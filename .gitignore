@@ -1,0 +1,17 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+backend/.env
+
+# Database (never commit real user data)
+backend/*.db
+backend/*.sqlite3
+
+# Editor/OS
+.DS_Store
+.vscode/

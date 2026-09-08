@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+email-validator
+# bcrypt is pinned below 4.1 because passlib 1.7.4 (unmaintained) reads a
+# bcrypt.__about__ attribute that 4.1+ removed, breaking password hashing.
+passlib==1.7.4
+bcrypt<4.1.0
+pyjwt
+python-dotenv

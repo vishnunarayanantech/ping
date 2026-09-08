@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your profile &mdash; ping</title>
+  <link rel="icon" href="../assets/images/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/css/main.css">
+</head>
+<body data-page-title="Your profile">
+
+  <header class="app-header">
+    <a class="app-header__brand" href="profile.html">
+      <img src="../assets/images/logo.svg" alt="">
+      <span data-app-name>ping</span>
+    </a>
+
+    <div class="app-header__actions">
+      <button type="button" class="icon-btn theme-toggle" aria-label="Toggle dark mode">
+        <i data-lucide="sun" class="icon-sun" aria-hidden="true"></i>
+        <i data-lucide="moon" class="icon-moon" aria-hidden="true"></i>
+      </button>
+
+      <div class="user-menu" id="userMenu">
+        <button type="button" class="user-menu__trigger" id="userMenuTrigger" aria-haspopup="true" aria-expanded="false">
+          <span class="avatar avatar--sm" id="headerAvatarInitials">JD</span>
+          <span class="user-menu__name" id="headerUserName">John Doe</span>
+          <i class="chevron" data-lucide="chevron-down" aria-hidden="true"></i>
+        </button>
+
+        <div class="dropdown-menu" role="menu">
+          <a class="dropdown-menu__item" href="profile.html" role="menuitem">
+            <i data-lucide="user" aria-hidden="true"></i>
+            View profile
+          </a>
+          <a class="dropdown-menu__item" href="#" role="menuitem">
+            <i data-lucide="settings" aria-hidden="true"></i>
+            Settings
+          </a>
+          <div class="dropdown-menu__divider"></div>
+          <a class="dropdown-menu__item dropdown-menu__item--danger" href="../auth/login.html" role="menuitem">
+            <i data-lucide="log-out" aria-hidden="true"></i>
+            Log out
+          </a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="profile-page">
+    <div class="card profile-card">
+      <div class="profile-card__cover"></div>
+
+      <div class="profile-card__body">
+        <div class="profile-card__top">
+          <span class="avatar avatar--lg" id="cardAvatarInitials">JD</span>
+
+          <div class="profile-card__actions" id="viewActions">
+            <button type="button" class="btn btn--secondary" id="editBtn">
+              <i data-lucide="pencil" aria-hidden="true"></i>
+              Edit profile
+            </button>
+          </div>
+
+          <div class="profile-card__actions" id="editActions" hidden>
+            <button type="button" class="btn btn--ghost" id="cancelBtn">Cancel</button>
+            <button type="button" class="btn btn--primary" id="saveBtn">
+              <span class="btn__label">Save changes</span>
+              <span class="btn__spinner" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="profile-card__heading">
+          <h1 id="displayName">John Doe</h1>
+          <p id="displayRole">Software Engineer &middot; Engineering</p>
+        </div>
+
+        <form id="profileForm" novalidate>
+          <div class="profile-grid">
+
+            <div class="profile-field">
+              <span class="profile-field__label">
+                <i data-lucide="user" aria-hidden="true"></i>
+                Full name
+              </span>
+              <span class="profile-field__value" data-view="fullName">John Doe</span>
+              <input class="input" type="text" id="fullName" name="fullName" value="John Doe" hidden>
+            </div>
+
+            <div class="profile-field">
+              <span class="profile-field__label">
+                <i data-lucide="briefcase" aria-hidden="true"></i>
+                Job title
+              </span>
+              <span class="profile-field__value" data-view="jobTitle">Software Engineer</span>
+              <input class="input" type="text" id="jobTitle" name="jobTitle" value="Software Engineer" hidden>
+            </div>
+
+            <div class="profile-field">
+              <span class="profile-field__label">
+                <i data-lucide="building-2" aria-hidden="true"></i>
+                Department
+              </span>
+              <span class="profile-field__value" data-view="department">Engineering</span>
+              <input class="input" type="text" id="department" name="department" value="Engineering" hidden>
+            </div>
+
+            <div class="profile-field">
+              <span class="profile-field__label">
+                <i data-lucide="mail" aria-hidden="true"></i>
+                Company email
+                <span class="readonly-badge">
+                  <i data-lucide="lock" aria-hidden="true"></i>
+                  Read-only
+                </span>
+              </span>
+              <span class="profile-field__value">john.doe@company.com</span>
+            </div>
+
+            <div class="profile-field">
+              <span class="profile-field__label">
+                <i data-lucide="id-card" aria-hidden="true"></i>
+                Employee ID
+                <span class="readonly-badge">
+                  <i data-lucide="lock" aria-hidden="true"></i>
+                  Read-only
+                </span>
+              </span>
+              <span class="profile-field__value">EMP-1024</span>
+            </div>
+
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="../assets/js/config.js"></script>
+  <script src="../assets/js/main.js"></script>
+  <script src="../assets/js/profile.js"></script>
+</body>
+</html>

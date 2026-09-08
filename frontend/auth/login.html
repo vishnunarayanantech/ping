@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log in — PING</title>
+  <link rel="icon" href="../assets/images/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/css/main.css">
+</head>
+<body class="auth-page" data-page-title="Log in">
+
+  <button type="button" class="icon-btn theme-toggle page-theme-toggle" aria-label="Toggle dark mode">
+    <i data-lucide="sun" class="icon-sun" aria-hidden="true"></i>
+    <i data-lucide="moon" class="icon-moon" aria-hidden="true"></i>
+  </button>
+
+  <div class="split-layout">
+
+    <!-- Branding panel (hidden on mobile) -->
+    <section class="branding-panel" aria-hidden="true">
+      <div class="branding-panel__shapes">
+        <span></span><span></span><span></span>
+      </div>
+
+      <div class="branding-panel__content">
+        <div class="brand-mark">
+          <img src="../assets/images/logo.svg" alt="">
+          <span data-app-name>PING</span>
+        </div>
+      </div>
+
+      <div class="branding-panel__headline">
+        <h1 data-app-tagline>Work. Talk. PING.</h1>
+        <p>One focused workspace for your team's messages, updates, and files &mdash; nothing you don't need.</p>
+      </div>
+
+      <p class="branding-panel__footer">&copy; 2026 <span data-app-name>PING</span>. Internal use only.</p>
+    </section>
+
+    <!-- Form panel -->
+    <section class="form-panel">
+      <div class="form-panel__inner">
+
+        <div class="form-panel__header">
+          <h2>Welcome back</h2>
+          <p>Log in to your <span data-app-name>PING</span> workspace.</p>
+        </div>
+
+        <form id="loginForm" novalidate>
+
+          <p class="form-alert" id="formAlert" role="alert"></p>
+
+          <div class="field" id="emailField">
+            <label class="field__label" for="email">Company email</label>
+            <div class="field__control">
+              <i class="field__icon" data-lucide="mail" aria-hidden="true"></i>
+              <input
+                class="input has-icon"
+                type="email"
+                id="email"
+                name="email"
+                placeholder="you@company.com"
+                autocomplete="username"
+                aria-describedby="emailError"
+              >
+            </div>
+            <p class="field__error" id="emailError" role="alert"></p>
+          </div>
+
+          <div class="field" id="passwordField">
+            <label class="field__label" for="password">Password</label>
+            <div class="field__control">
+              <input
+                class="input has-toggle"
+                type="password"
+                id="password"
+                name="password"
+                placeholder="Enter your password"
+                autocomplete="current-password"
+                aria-describedby="passwordError"
+              >
+              <button type="button" class="icon-btn password-toggle" data-target="#password" aria-label="Show password">
+                <i class="icon-show" data-lucide="eye" aria-hidden="true"></i>
+                <i class="icon-hide" data-lucide="eye-off" aria-hidden="true"></i>
+              </button>
+            </div>
+            <p class="field__error" id="passwordError" role="alert"></p>
+          </div>
+
+          <div class="form-options">
+            <label class="checkbox">
+              <input type="checkbox" id="rememberMe" name="rememberMe">
+              <span class="checkbox__box">
+                <i data-lucide="check" aria-hidden="true"></i>
+              </span>
+              Remember me
+            </label>
+            <a class="link" href="forgot-password.html">Forgot password?</a>
+          </div>
+
+          <button type="submit" class="btn btn--primary btn--block" id="loginBtn" disabled>
+            <span class="btn__label">Sign In</span>
+            <span class="btn__spinner" aria-hidden="true"></span>
+          </button>
+
+          <p class="form-footer">
+            Don't have an account? <a class="link" href="register.html">Create one</a>
+          </p>
+
+          <div class="notice">
+            <i data-lucide="shield-check" aria-hidden="true"></i>
+            <span>Only authorized company accounts can access <span data-app-name>PING</span>.</span>
+          </div>
+        </form>
+
+      </div>
+    </section>
+  </div>
+
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="../assets/js/config.js"></script>
+  <script src="../assets/js/main.js"></script>
+  <script src="../assets/js/auth.js"></script>
+</body>
+</html>

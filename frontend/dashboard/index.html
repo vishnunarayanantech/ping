@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PING</title>
+  <link rel="icon" href="../assets/images/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/css/main.css">
+</head>
+<body data-page-title="PING">
+
+  <div class="app-shell" id="appShell">
+
+    <!-- Sidebar: search + current user -->
+    <aside class="app-sidebar">
+      <div class="app-sidebar__header">
+        <a class="app-header__brand" href="index.html">
+          <img src="../assets/images/logo.svg" alt="">
+          <span data-app-name>PING</span>
+        </a>
+        <button type="button" class="icon-btn theme-toggle" aria-label="Toggle dark mode">
+          <i data-lucide="sun" class="icon-sun" aria-hidden="true"></i>
+          <i data-lucide="moon" class="icon-moon" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div class="app-sidebar__search">
+        <div class="search-input">
+          <i data-lucide="search" class="search-input__icon" aria-hidden="true"></i>
+          <label for="userSearchInput" class="visually-hidden">Search people</label>
+          <input type="text" id="userSearchInput" placeholder="Search people..." autocomplete="off">
+        </div>
+        <div class="search-results" id="searchResults" hidden></div>
+      </div>
+
+      <div class="app-sidebar__conversations">
+        <span class="sidebar-section-label">Recent Chats</span>
+        <div class="conversation-list" id="conversationList"></div>
+      </div>
+
+      <div class="app-sidebar__footer">
+        <div class="sidebar-user">
+          <span class="avatar avatar--sm" id="sidebarUserInitials"></span>
+          <span class="sidebar-user__info">
+            <span class="sidebar-user__name" id="sidebarUserName"></span>
+            <span class="sidebar-user__email" id="sidebarUserEmail"></span>
+          </span>
+        </div>
+        <button type="button" class="icon-btn" id="logoutBtn" aria-label="Logout" title="Logout">
+          <i data-lucide="log-out" aria-hidden="true"></i>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Chat area -->
+    <main class="app-chat">
+
+      <!-- Empty state: no conversation selected -->
+      <div class="chat-empty" id="chatEmpty">
+        <div class="chat-empty__icon">
+          <i data-lucide="message-circle" aria-hidden="true"></i>
+        </div>
+        <h1>Welcome to <span data-app-name>PING</span></h1>
+        <p>Search for a colleague to start a conversation.</p>
+      </div>
+
+      <!-- Active conversation -->
+      <div class="chat-conversation" id="chatConversation" hidden>
+        <header class="chat-header">
+          <button type="button" class="chat-header__back" id="chatBackBtn" aria-label="Back to chats">
+            <i data-lucide="arrow-left" aria-hidden="true"></i>
+            <span class="chat-header__back-label">Chats</span>
+          </button>
+          <span class="avatar avatar--sm" id="chatHeaderInitials"></span>
+          <span class="chat-header__name" id="chatHeaderName"></span>
+        </header>
+
+        <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+
+        <form class="chat-input-bar" id="messageForm" novalidate>
+          <label for="messageInput" class="visually-hidden">Message</label>
+          <input type="text" id="messageInput" name="message" placeholder="Type a message..." autocomplete="off" maxlength="5000">
+          <button type="submit" class="btn btn--primary chat-send-btn" id="sendBtn" disabled aria-label="Send message">
+            <i data-lucide="send" aria-hidden="true"></i>
+          </button>
+        </form>
+      </div>
+
+    </main>
+  </div>
+
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="../assets/js/config.js"></script>
+  <script src="../assets/js/main.js"></script>
+  <script src="../assets/js/api.js"></script>
+  <script src="../assets/js/users.js"></script>
+  <script src="../assets/js/conversations.js"></script>
+  <script src="../assets/js/chat.js"></script>
+  <script src="../assets/js/dashboard.js"></script>
+</body>
+</html>

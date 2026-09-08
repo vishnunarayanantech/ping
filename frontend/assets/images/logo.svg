@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none" role="img" aria-label="Connect logo">
+  <defs>
+    <linearGradient id="logoGradient" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7d6cf0"/>
+      <stop offset="1" stop-color="#4548d6"/>
+    </linearGradient>
+  </defs>
+  <rect width="40" height="40" rx="11" fill="url(#logoGradient)"/>
+  <path d="M26.5 14.2c-3.2-3.1-8.4-3.1-11.6 0-3.2 3.2-3.2 8.3 0 11.5" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M13.5 25.8c3.2 3.1 8.4 3.1 11.6 0 3.2-3.2 3.2-8.3 0-11.5" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" opacity="0.55"/>
+</svg>
