@@ -1,11 +1,14 @@
 """
-Message endpoints: send a message into a conversation, fetch a
-conversation's history (each message including its reaction summaries),
-add/remove the caller's own emoji reaction to a message, forward a message
-into one or more other conversations, and upload/download file-share
-messages. All require the caller to be a member of the relevant
-conversation(s) — never assume a conversation_id/message_id alone means the
-caller has access.
+Message endpoints: send a message into a conversation, edit one of the
+caller's own messages in place, fetch a conversation's history (each
+message including its reaction summaries), add/remove the caller's own
+emoji reaction to a message, forward a message into one or more other
+conversations, and upload/download file-share messages. Sending/fetching/
+reacting/forwarding/uploading are gated on conversation membership — never
+assume a conversation_id/message_id alone means the caller has access.
+Editing is gated on message ownership instead (see edit_message) — a
+conversation member who isn't the original sender must never be able to
+change another member's message.
 """
 import os
 from datetime import datetime, timezone
@@ -26,6 +29,7 @@ from schemas import (
     MessageFileOut,
     MessageOut,
     MessageReactionsResponse,
+    MessageUpdate,
     ReactionCreate,
     ReplyPreview,
     SendMessageResponse,
@@ -87,6 +91,53 @@ def send_message(
         message_out.reply_to = ReplyPreview(
             id=reply_to.id, sender_id=reply_to.sender_id, sender_name=reply_to.sender.name, content=reply_to.content
         )
+
+    return SendMessageResponse(success=True, message=message_out)
+
+
+@router.put("/{message_id}", response_model=SendMessageResponse)
+def edit_message(
+    message_id: int,
+    payload: MessageUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Edit a message's content in place — same row, same id, same created_at.
+    Ownership (not conversation membership) is the access-control boundary
+    here: only the original sender may ever call this, since only the
+    sender is even allowed to have something to say about their own
+    message's wording. MessageUpdate.Config.extra="forbid" already keeps
+    sender_id/conversation_id/created_at/reply_to_message_id/
+    forwarded_from_message_id/id out of the request body entirely; this is
+    the check that keeps another member of the same conversation from
+    editing someone else's message by calling the endpoint directly.
+    """
+    message = _get_message_or_404(db, message_id)
+
+    if message.sender_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own messages")
+
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Message content cannot be empty")
+
+    message.content = content
+    message.edited_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(message)
+
+    # Same reactions/reply_to/forwarded_from/file attachment as
+    # get_conversation_messages below, just for the one edited row, so the
+    # frontend can drop this straight into state.messages in place without
+    # losing anything already showing on that row.
+    message_out = MessageOut.model_validate(message)
+    message_out.reactions = reaction_service.get_reactions_for_message(db, message.id, current_user.id)
+    message_out.reply_to = reply_service.get_reply_previews_by_message(db, [message]).get(message.id)
+    message_out.forwarded_from = forward_service.get_forward_previews_by_message(db, [message]).get(message.id)
+    message_file = file_service.get_file_for_message(db, message.id)
+    if message_file:
+        message_out.file = MessageFileOut.model_validate(message_file)
 
     return SendMessageResponse(success=True, message=message_out)
 

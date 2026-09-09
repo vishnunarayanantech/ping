@@ -1354,7 +1354,9 @@ p {
 
 .message-react-btn,
 .message-reply-btn,
-.message-forward-btn {
+.message-forward-btn,
+.message-copy-btn,
+.message-edit-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1375,6 +1377,8 @@ p {
 .message-row:hover .message-react-btn,
 .message-row:hover .message-reply-btn,
 .message-row:hover .message-forward-btn,
+.message-row:hover .message-copy-btn,
+.message-row:hover .message-edit-btn,
 .message-react-btn.is-open {
   opacity: 1;
   visibility: visible;
@@ -1383,14 +1387,18 @@ p {
 
 .message-react-btn:hover,
 .message-reply-btn:hover,
-.message-forward-btn:hover {
+.message-forward-btn:hover,
+.message-copy-btn:hover,
+.message-edit-btn:hover {
   background: var(--color-surface-alt);
   color: var(--color-text-primary);
 }
 
 .message-react-btn svg,
 .message-reply-btn svg,
-.message-forward-btn svg {
+.message-forward-btn svg,
+.message-copy-btn svg,
+.message-edit-btn svg {
   width: 15px;
   height: 15px;
 }
@@ -1854,6 +1862,17 @@ p {
 .reply-preview__close svg {
   width: 16px;
   height: 16px;
+}
+
+/* Same bar, repurposed for the composer's editing state (see chat.js
+   startEdit/renderReplyPreview) — reply and edit are mutually exclusive, so
+   this just swaps the accent color to tell the two apart at a glance. */
+.reply-preview--edit .reply-preview__bar {
+  background: var(--color-warning);
+}
+
+.reply-preview--edit .reply-preview__sender {
+  color: var(--color-warning);
 }
 
 .chat-input-bar {

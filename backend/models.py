@@ -98,6 +98,15 @@ class Message(Base):
     # needs the original sender's name, built explicitly in
     # services/forward_service.py.
     forwarded_from_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
+    # NULL for a message that's never been edited — the frontend shows the
+    # plain send time for those. Set to the edit's server time whenever the
+    # sender updates `content` via PUT /messages/{id} (routers/messages.py),
+    # which is also the ONLY thing that ever writes this column or `content`
+    # after creation. created_at is deliberately left untouched by an edit so
+    # the original send time always survives — see chat.js's "Edited · <time>"
+    # rendering, which reads created_at for the time and edited_at only to
+    # decide whether to show that prefix.
+    edited_at = Column(DateTime(timezone=True), nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
     sender = relationship("User")

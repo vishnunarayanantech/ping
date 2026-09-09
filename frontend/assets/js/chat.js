@@ -31,12 +31,17 @@ const Chat = (function ($) {
     // The message (a full entry from state.messages) the composer is
     // currently replying to, or null. Also just a render flag — cleared on
     // send, cancel, or switching/closing conversations.
-    replyTo: null
+    replyTo: null,
+    // The message (a full entry from state.messages) the composer is
+    // currently editing, or null. Mutually exclusive with replyTo — starting
+    // one clears the other, same "render flag, not fetched state" reasoning
+    // as replyTo above. See startEdit/cancelEdit/saveEdit.
+    editingMessage: null
   };
 
   let $shell, $empty, $conversation, $headerAvatar, $headerName,
     $messages, $form, $input, $sendBtn,
-    $replyPreview, $replyPreviewSender, $replyPreviewContent;
+    $replyPreview, $replyPreviewSender, $replyPreviewContent, $replyPreviewClose;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -53,6 +58,7 @@ const Chat = (function ($) {
     $replyPreview = $('#replyPreview');
     $replyPreviewSender = $('#replyPreviewSender');
     $replyPreviewContent = $('#replyPreviewContent');
+    $replyPreviewClose = $('#replyPreviewClose');
 
     $input.on('input', function () {
       $sendBtn.prop('disabled', $input.val().trim() === '');
@@ -60,12 +66,25 @@ const Chat = (function ($) {
 
     $form.on('submit', function (e) {
       e.preventDefault();
-      send();
+      if (state.editingMessage) {
+        saveEdit();
+      } else {
+        send();
+      }
     });
 
     $('#chatBackBtn').on('click', closeConversation);
 
-    $('#replyPreviewClose').on('click', cancelReply);
+    // Same close button drives both the reply preview and the edit preview
+    // (they're the same bar — see renderReplyPreview) — whichever one is
+    // actually active is what Escape/this click cancels.
+    $replyPreviewClose.on('click', function () {
+      if (state.editingMessage) {
+        cancelEdit();
+      } else {
+        cancelReply();
+      }
+    });
 
     // Emoji picker: close on outside click / Escape, same pattern as the
     // profile page's user-menu dropdown. The picker's own open/close click
@@ -78,6 +97,7 @@ const Chat = (function ($) {
     $(document).on('keydown', function (e) {
       if (e.key === 'Escape') {
         closeOpenPicker();
+        cancelEdit();
       }
     });
   }
@@ -90,6 +110,7 @@ const Chat = (function ($) {
     state.lastMarkedMessageId = null;
     state.openPickerMessageId = null;
     state.replyTo = null;
+    state.editingMessage = null;
 
     $shell.addClass('app-shell--conversation-open');
     $empty.prop('hidden', true);
@@ -122,6 +143,7 @@ const Chat = (function ($) {
     state.lastMarkedMessageId = null;
     state.openPickerMessageId = null;
     state.replyTo = null;
+    state.editingMessage = null;
     $shell.removeClass('app-shell--conversation-open');
     $conversation.prop('hidden', true);
     $empty.prop('hidden', false);
@@ -177,6 +199,7 @@ const Chat = (function ($) {
     state.messages.push(message);
     state.lastMarkedMessageId = message.id; // our own upload never needs marking read
     cancelReply(); // mirror send()'s success behavior — same reasoning as there
+    cancelEdit(); // an upload is a new message, not the edit (if any) in progress — don't leave stale edit state behind
     renderMessages(true);
   }
 
@@ -189,6 +212,7 @@ const Chat = (function ($) {
   /** Set the message the composer is replying to and show its preview above
    * the input. Called from the row-hover reply button. */
   function startReply(message) {
+    state.editingMessage = null; // mutually exclusive with editing — see state.editingMessage
     state.replyTo = message;
     renderReplyPreview();
     $input.trigger('focus');
@@ -200,7 +224,60 @@ const Chat = (function ($) {
     renderReplyPreview();
   }
 
+  /** Only the sender's own, plain text messages are editable in this UI — a
+   * file-share message's content is never rendered (buildFileOrMediaBlock
+   * shows the file block instead, same as a forwarded message's content is
+   * never rendered — buildForwardBlock shows forwarded_from.content
+   * instead), so "editing" either would change a value nothing on screen
+   * ever displays. The backend doesn't need this same restriction: it's a
+   * UI-only scoping decision, not a security boundary (see edit_message's
+   * ownership check for that). */
+  function canEditMessage(message) {
+    return message.sender_id === state.currentUser.id && !message.file && !message.forwarded_from;
+  }
+
+  /** Put a message's text into the composer for editing and show the
+   * editing-state bar above it. Called from the row-hover edit button
+   * (only rendered for messages canEditMessage() allows). */
+  function startEdit(message) {
+    state.replyTo = null; // mutually exclusive with replying — see state.replyTo
+    state.editingMessage = message;
+    $input.val(message.content);
+    $sendBtn.prop('disabled', message.content.trim() === '');
+    renderReplyPreview();
+    $input.trigger('focus');
+  }
+
+  /** Exit edit mode and restore the normal composer — used both by the
+   * Cancel button and after a successful save. */
+  function cancelEdit() {
+    if (state.editingMessage === null) return;
+    state.editingMessage = null;
+    $input.val('');
+    $sendBtn.prop('disabled', true);
+    renderReplyPreview();
+  }
+
+  /**
+   * Same bar renders either the reply-target preview or the editing-state
+   * preview — they're mutually exclusive (see startReply/startEdit) and
+   * share the same "colored bar + label + content + close button" shape
+   * (compare the reply-preview and .reply-preview--edit CSS), so this picks
+   * whichever is active rather than keeping two separate DOM blocks in sync.
+   */
   function renderReplyPreview() {
+    if (state.editingMessage) {
+      $replyPreview.addClass('reply-preview--edit');
+      $replyPreviewSender.text('Editing message');
+      $replyPreviewContent.text(state.editingMessage.content);
+      $replyPreviewClose.attr('aria-label', 'Cancel edit');
+      $replyPreview.prop('hidden', false);
+      return;
+    }
+
+    $replyPreview.removeClass('reply-preview--edit');
+    $replyPreviewClose.attr('aria-label', 'Cancel reply');
+
     if (!state.replyTo) {
       $replyPreview.prop('hidden', true);
       return;
@@ -208,6 +285,55 @@ const Chat = (function ($) {
     $replyPreviewSender.text(senderDisplayName(state.replyTo.sender_id));
     $replyPreviewContent.text(state.replyTo.content);
     $replyPreview.prop('hidden', false);
+  }
+
+  /**
+   * Copy a message's text to the clipboard — available on every message
+   * regardless of sender or type. message.content is always plain text
+   * (a file-share message's is its "📎 <filename>" caption, a forwarded
+   * message's is the forwarded text itself — see models.MessageFile's
+   * docstring for why the actual file bytes never pass through here), so
+   * there's never anything binary to guard against copying.
+   */
+  function copyMessageContent(message) {
+    copyTextToClipboard(message.content || '')
+      .then(function () {
+        Ping.showToast('Copied to clipboard', 'success');
+      })
+      .catch(function () {
+        Ping.showToast('Unable to copy message.', 'error');
+      });
+  }
+
+  /**
+   * navigator.clipboard requires a secure context (HTTPS, or localhost) —
+   * true for this app's normal dev/deploy origins, but not guaranteed for
+   * every future one (e.g. plain-http on a LAN IP). Falls back to the
+   * classic hidden-textarea + execCommand('copy') trick so Copy still works
+   * there instead of silently doing nothing.
+   */
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        const $tmp = $('<textarea>', { readonly: true })
+          .val(text)
+          .css({ position: 'fixed', top: '-1000px', left: '-1000px', opacity: 0 });
+        $('body').append($tmp);
+        $tmp[0].select();
+        const copied = document.execCommand('copy');
+        $tmp.remove();
+        if (copied) {
+          resolve();
+        } else {
+          reject(new Error('execCommand copy failed'));
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
   }
 
   /**
@@ -304,6 +430,45 @@ const Chat = (function ($) {
       .fail(function (xhr) {
         if (xhr.status === 401) return;
         Ping.showToast(Ping.getErrorMessage(xhr, 'Message failed to send.'), 'error');
+      })
+      .always(function () {
+        $sendBtn.prop('disabled', $input.val().trim() === '');
+        $input.trigger('focus');
+      });
+  }
+
+  /**
+   * Save an in-progress edit (see startEdit). Updates the existing message
+   * row in place via PUT — never pushes a new entry onto state.messages
+   * the way send() does, and only re-renders the one affected row (like
+   * toggleReaction's rerenderRow, not the full-list renderMessages) so nothing
+   * else in the conversation — scroll position, other rows' entrance
+   * animations — is disturbed by saving an edit.
+   */
+  function saveEdit() {
+    const content = $input.val().trim();
+    if (!content || !state.editingMessage) return;
+
+    const messageId = state.editingMessage.id;
+    $sendBtn.prop('disabled', true);
+
+    Api.request({
+      url: '/messages/' + messageId,
+      method: 'PUT',
+      data: { content: content }
+    })
+      .done(function (response) {
+        const index = state.messages.findIndex(function (m) { return m.id === response.message.id; });
+        if (index !== -1) {
+          state.messages[index] = response.message;
+        }
+        cancelEdit(); // only on success — a failed save keeps editing context so retry doesn't lose it, same as send()'s reply context
+        rerenderRow(response.message.id);
+        Conversations.refresh(); // sidebar's last-message preview may show this message's (now-changed) content
+      })
+      .fail(function (xhr) {
+        if (xhr.status === 401) return;
+        Ping.showToast(Ping.getErrorMessage(xhr, 'Unable to update message.'), 'error');
       })
       .always(function () {
         $sendBtn.prop('disabled', $input.val().trim() === '');
@@ -428,7 +593,11 @@ const Chat = (function ($) {
       }
       $('<div>', { class: 'message-bubble__content' }).text(message.content).appendTo($bubble);
     }
-    $('<div>', { class: 'message-bubble__time' }).text(formatTime(message.created_at)).appendTo($bubble);
+    // created_at (never edited_at) is always what's shown as the time — an
+    // edit never changes when the message was originally sent, only whether
+    // the "Edited" prefix appears (see models.Message.edited_at's docstring).
+    const timeText = message.edited_at ? 'Edited · ' + formatTime(message.created_at) : formatTime(message.created_at);
+    $('<div>', { class: 'message-bubble__time' }).text(timeText).appendTo($bubble);
 
     const $replyBtn = $('<button>', {
       type: 'button',
@@ -472,7 +641,39 @@ const Chat = (function ($) {
       }
     });
 
-    $wrap.append($bubble, $replyBtn, $forwardBtn, $reactBtn);
+    // Copy is available on every message regardless of sender — see
+    // copyMessageContent's docstring for why copying message.content as-is
+    // is always safe (never binary) even for a file-share message.
+    const $copyBtn = $('<button>', {
+      type: 'button',
+      class: 'message-copy-btn',
+      'aria-label': 'Copy message'
+    });
+    $('<i>', { 'data-lucide': 'copy', 'aria-hidden': 'true' }).appendTo($copyBtn);
+    $copyBtn.on('click', function (e) {
+      e.stopPropagation();
+      closeOpenPicker();
+      copyMessageContent(message);
+    });
+
+    $wrap.append($bubble, $replyBtn, $forwardBtn, $reactBtn, $copyBtn);
+
+    // Edit only ever appears on the sender's own plain text messages — see
+    // canEditMessage's docstring for why file/forwarded messages are excluded.
+    if (canEditMessage(message)) {
+      const $editBtn = $('<button>', {
+        type: 'button',
+        class: 'message-edit-btn',
+        'aria-label': 'Edit message'
+      });
+      $('<i>', { 'data-lucide': 'pencil', 'aria-hidden': 'true' }).appendTo($editBtn);
+      $editBtn.on('click', function (e) {
+        e.stopPropagation();
+        closeOpenPicker();
+        startEdit(message);
+      });
+      $wrap.append($editBtn);
+    }
 
     if (pickerOpen) {
       $wrap.append(buildEmojiPicker(message.id));

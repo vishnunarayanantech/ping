@@ -170,6 +170,20 @@ class MessageCreate(BaseModel):
     reply_to_message_id: Optional[int] = None
 
 
+class MessageUpdate(BaseModel):
+    """PUT /messages/{message_id} body. `extra = "forbid"` is a deliberate
+    belt-and-suspenders alongside routers/messages.py's ownership check —
+    content is the only field a client can ever supply here, so there's no
+    body shape that could smuggle a sender_id/conversation_id/created_at/
+    reply_to_message_id/forwarded_from_message_id/id change through, same
+    reasoning as ProfileUpdate's docstring."""
+
+    content: str = Field(min_length=1, max_length=5000)
+
+    class Config:
+        extra = "forbid"
+
+
 # The picker only ever offers these — restricting the backend to the same set
 # keeps a direct API call from stuffing arbitrary text into what's rendered
 # (and displayed back to every conversation member) as an "emoji".
@@ -276,6 +290,10 @@ class MessageOut(BaseModel):
     sender_id: int
     content: str
     created_at: datetime
+    # NULL until the sender edits this message (PUT /messages/{id}) — see
+    # models.Message.edited_at's docstring. Populated straight off the ORM
+    # column like created_at, no service lookup needed.
+    edited_at: Optional[datetime] = None
     reply_to_message_id: Optional[int] = None
     # Populated only when reply_to_message_id is set — see
     # services/reply_service.py. None both for ordinary messages and for a
@@ -297,6 +315,11 @@ class MessageOut(BaseModel):
     @classmethod
     def _created_at_utc(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
+
+    @field_validator("edited_at")
+    @classmethod
+    def _edited_at_utc(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _ensure_utc(value) if value is not None else None
 
     class Config:
         from_attributes = True

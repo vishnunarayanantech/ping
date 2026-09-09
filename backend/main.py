@@ -62,6 +62,14 @@ def _add_missing_columns():
                 text("ALTER TABLE messages ADD COLUMN forwarded_from_message_id INTEGER REFERENCES messages(id)")
             )
 
+    # message editing: same trick for `messages.edited_at`. Every existing
+    # message ends up with NULL here, which is exactly "never edited" — no
+    # backfill needed, and old messages render exactly as before.
+    message_columns = {col["name"] for col in inspector.get_columns("messages")}
+    if "edited_at" not in message_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN edited_at TIMESTAMP"))
+
     # editable profile fields: same trick for users.job_title/department
     # (both start '' for existing rows — "no title set yet", not NULL, so
     # the frontend never has to special-case a null string) and
