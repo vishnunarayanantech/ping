@@ -1,7 +1,9 @@
 """
-Message endpoints: send a message into a conversation, and fetch a
-conversation's history. Both require the caller to be a member of the
-conversation — never assume a conversation_id means the caller has access.
+Message endpoints: send a message into a conversation, fetch a
+conversation's history (each message including its reaction summaries),
+and add/remove the caller's own emoji reaction to a message. All four
+require the caller to be a member of the message's conversation — never
+assume a conversation_id/message_id alone means the caller has access.
 """
 from datetime import datetime, timezone
 
@@ -10,11 +12,26 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Conversation, Message, User
-from schemas import ConversationResponse, MessageCreate, MessageOut, SendMessageResponse
+from schemas import (
+    ConversationResponse,
+    MessageCreate,
+    MessageOut,
+    MessageReactionsResponse,
+    ReactionCreate,
+    SendMessageResponse,
+)
 from security import get_current_user
+from services import reaction_service
 from services.conversation_service import is_conversation_member
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+def _get_message_or_404(db: Session, message_id: int) -> Message:
+    message = db.query(Message).filter(Message.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+    return message
 
 
 @router.post("", response_model=SendMessageResponse, status_code=status.HTTP_201_CREATED)
@@ -63,4 +80,50 @@ def get_conversation_messages(
         .order_by(Message.created_at, Message.id)
         .all()
     )
-    return ConversationResponse(success=True, messages=[MessageOut.model_validate(m) for m in messages])
+
+    reactions_by_message = reaction_service.get_reactions_by_message(
+        db, [m.id for m in messages], current_user.id
+    )
+    message_outs = []
+    for m in messages:
+        message_out = MessageOut.model_validate(m)
+        message_out.reactions = reactions_by_message.get(m.id, [])
+        message_outs.append(message_out)
+
+    return ConversationResponse(success=True, messages=message_outs)
+
+
+@router.post("/{message_id}/reactions", response_model=MessageReactionsResponse)
+def add_reaction(
+    message_id: int,
+    payload: ReactionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message = _get_message_or_404(db, message_id)
+
+    if not is_conversation_member(db, message.conversation_id, current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this conversation")
+
+    reaction_service.add_reaction(db, message_id, current_user.id, payload.emoji)
+
+    reactions = reaction_service.get_reactions_for_message(db, message_id, current_user.id)
+    return MessageReactionsResponse(success=True, reactions=reactions)
+
+
+@router.delete("/{message_id}/reactions/{emoji}", response_model=MessageReactionsResponse)
+def remove_reaction(
+    message_id: int,
+    emoji: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message = _get_message_or_404(db, message_id)
+
+    if not is_conversation_member(db, message.conversation_id, current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this conversation")
+
+    reaction_service.remove_reaction(db, message_id, current_user.id, emoji)
+
+    reactions = reaction_service.get_reactions_for_message(db, message_id, current_user.id)
+    return MessageReactionsResponse(success=True, reactions=reactions)

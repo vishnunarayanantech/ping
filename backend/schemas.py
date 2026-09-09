@@ -57,12 +57,56 @@ class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=5000)
 
 
+# The picker only ever offers these — restricting the backend to the same set
+# keeps a direct API call from stuffing arbitrary text into what's rendered
+# (and displayed back to every conversation member) as an "emoji".
+ALLOWED_REACTION_EMOJIS = {"👍", "❤️", "😂", "😮", "😢", "😡", "🎉", "👏"}
+
+
+class ReactionCreate(BaseModel):
+    emoji: str
+
+    @field_validator("emoji")
+    @classmethod
+    def _emoji_allowed(cls, value: str) -> str:
+        if value not in ALLOWED_REACTION_EMOJIS:
+            raise ValueError("Unsupported emoji")
+        return value
+
+
+class ReactionUserOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+class ReactionSummary(BaseModel):
+    """One emoji's aggregated state on a message — what the picker/pill UI needs
+    to render count, tooltip, and whether to show the "mine" highlight."""
+
+    emoji: str
+    count: int
+    users: List[ReactionUserOut]
+    reacted_by_me: bool
+
+
+class MessageReactionsResponse(BaseModel):
+    success: bool
+    reactions: List[ReactionSummary]
+
+
 class MessageOut(BaseModel):
     id: int
     conversation_id: int
     sender_id: int
     content: str
     created_at: datetime
+    # Defaults to [] when the source object has no `.reactions` attribute at
+    # all (a fresh Message from send_message, or model_validate on the ORM
+    # row before reactions are attached) — see MessageReaction's docstring.
+    reactions: List[ReactionSummary] = Field(default_factory=list)
 
     @field_validator("created_at")
     @classmethod

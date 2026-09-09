@@ -2,11 +2,11 @@
 
 Internal company communication platform — a lightweight alternative to Microsoft Teams.
 
-Current foundation: registration, login, user search, one-to-one direct messaging, and a
-recent-conversations sidebar, all end to end and backed by a real `conversations` /
-`conversation_members` schema (not just `sender_id`/`receiver_id` pairs — see "Data model"
-below). No WebSockets yet — the open conversation polls the REST API every 5s. Group chats,
-channels, unread counts, and real-time transport come in later iterations.
+Current foundation: registration, login, user search, one-to-one direct messaging, emoji
+message reactions, and a recent-conversations sidebar, all end to end and backed by a real
+`conversations` / `conversation_members` schema (not just `sender_id`/`receiver_id` pairs —
+see "Data model" below). No WebSockets yet — the open conversation polls the REST API every
+5s. Group chats, channels, and real-time transport come in later iterations.
 
 ## Architecture
 
@@ -36,18 +36,20 @@ PING/
 ├── backend/
 │   ├── main.py              FastAPI app, CORS, error handlers, router wiring
 │   ├── database.py          SQLAlchemy engine/session (SQLite by default)
-│   ├── models.py            User, Conversation, ConversationMember, Message tables
+│   ├── models.py            User, Conversation, ConversationMember, Message, MessageReaction tables
 │   ├── schemas.py           Pydantic request/response models
 │   ├── security.py          Password hashing + JWT create/verify + get_current_user
 │   ├── services/
-│   │   └── conversation_service.py  get-or-create direct conversation, sidebar query
+│   │   ├── conversation_service.py  get-or-create direct conversation, sidebar query
+│   │   └── reaction_service.py      add/remove a reaction, aggregate reactions per message
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── routers/
 │       ├── auth.py          POST /api/v1/auth/register, /login
 │       ├── users.py         GET  /api/v1/users/search?q=
 │       ├── conversations.py GET /api/v1/conversations, POST /api/v1/conversations/direct/{user_id}
-│       └── messages.py      POST /api/v1/messages, GET /api/v1/messages/conversation/{id}
+│       └── messages.py      POST /api/v1/messages, GET /api/v1/messages/conversation/{id},
+│                             POST/DELETE /api/v1/messages/{id}/reactions[/{emoji}]
 │
 ├── frontend/
 │   ├── index.html           Routes to dashboard or login based on session
@@ -144,17 +146,24 @@ Base path: `/api/v1`
 | POST   | `/conversations/direct/{user_id}`       | JWT  | — (get-or-create, never duplicates)  |
 | POST   | `/conversations/{conversation_id}/read` | JWT  | — (sets caller's `last_read_at` for that conversation) |
 | POST   | `/messages`                             | JWT  | `{ conversation_id, content }`      |
-| GET    | `/messages/conversation/{conversation_id}` | JWT | —                                 |
+| GET    | `/messages/conversation/{conversation_id}` | JWT | — (each message includes its `reactions`) |
+| POST   | `/messages/{message_id}/reactions`      | JWT  | `{ emoji }` (one of the 8 allowed — see below) |
+| DELETE | `/messages/{message_id}/reactions/{emoji}` | JWT | —                                 |
 
-Every response uses the same envelope shape: `{ "success": bool, "message"|"messages"|"users"|"conversations"|"conversation": ... }`.
+Every response uses the same envelope shape: `{ "success": bool, "message"|"messages"|"users"|"conversations"|"conversation"|"reactions": ... }`.
 Errors are always `{ "success": false, "message": "..." }` with an appropriate status code
 (401 unauthenticated/invalid credentials, 403 not a conversation member, 404 not found,
 409 duplicate email, 422 validation, 500 unhandled). Password hashes are never included in
 any response.
 
+Both reaction endpoints return the message's full, freshly-aggregated `reactions` list (not
+just the one emoji touched), so the frontend can replace its local copy outright instead of
+patching it — each entry is `{ emoji, count, users: [{id, name}], reacted_by_me }`.
+
 ## Data model
 
-`users`, `conversations`, `conversation_members`, `messages` — see `backend/models.py`.
+`users`, `conversations`, `conversation_members`, `messages`, `message_reactions` — see
+`backend/models.py`.
 A message belongs to a conversation (`conversation_id`) and a sender; a conversation's
 members live in `conversation_members`, not on the message itself. This replaced an earlier
 `sender_id`/`receiver_id`-on-message design — see "Schema history" below.
@@ -184,6 +193,15 @@ members live in `conversation_members`, not on the message itself. This replaced
   conversation on the sidebar, not one query per conversation. `POST /conversations/{id}/read`
   (`mark_conversation_read()`) sets it to the conversation's latest message's `created_at` (or
   the current server time if there are no messages yet) rather than trusting the browser's clock.
+- **Reactions**: `message_reactions` has a unique constraint on `(message_id, user_id, emoji)` —
+  the DB itself is what guarantees a user can't double-react with the same emoji, not
+  application-level checking (`reaction_service.add_reaction()` inserts and simply catches the
+  resulting `IntegrityError` if the row already exists, which also makes it safe under a race
+  between two near-simultaneous requests). Both `POST` and `DELETE` verify conversation
+  membership first, the same as every other message endpoint. `get_reactions_by_message()`
+  fetches and aggregates every message's reactions in one query regardless of how many messages
+  are being listed — same batching principle as the sidebar query above — rather than one query
+  per message.
 
 ### Schema history
 
@@ -206,6 +224,10 @@ ADD COLUMN` at startup (checked via `sqlalchemy.inspect()`, so it's a no-op once
 exists) — additive and safe on every restart, same as `create_all()` itself, just covering the
 one case it can't. This is the pattern to reach for first when a future column needs adding to
 an existing table; a full Alembic setup is still deliberately not in place (see above).
+
+Reactions needed neither trick: `message_reactions` is a brand new table, not a new column on
+an existing one, and `create_all()` handles creating whole new tables (including on a database
+that already has real rows in every other table) just fine on its own.
 
 ## Real-time strategy
 
@@ -259,4 +281,8 @@ the real deployed frontend origin — before shipping to production. Never set
 - Frontend validation (required fields, email format, length, match) is a UX convenience
   only; the backend independently re-validates everything via Pydantic and its own checks.
 - Message content is always inserted via jQuery `.text()`, never `.html()` — untrusted
-  user input is never treated as markup.
+  user input is never treated as markup. Reaction emoji, usernames, and counts follow the
+  same rule.
+- Reaction emoji are restricted server-side (`schemas.ALLOWED_REACTION_EMOJIS`) to the same
+  8 the picker offers — a direct API call can't stash arbitrary text in what's displayed back
+  to every conversation member as an "emoji".

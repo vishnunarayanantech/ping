@@ -65,3 +65,25 @@ class Message(Base):
 
     conversation = relationship("Conversation", back_populates="messages")
     sender = relationship("User")
+
+
+class MessageReaction(Base):
+    """
+    One user's emoji reaction to one message. No `reactions` back_populates on
+    Message on purpose: schemas.MessageOut has its own `reactions` field shaped
+    as aggregated summaries (emoji/count/users/reacted_by_me), not raw rows, so
+    it's built explicitly in services/reaction_service.py rather than through
+    an ORM relationship — from_attributes validation would otherwise try to
+    coerce these raw rows straight into that summary shape and fail.
+    """
+
+    __tablename__ = "message_reactions"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", "emoji", name="uq_message_reaction"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    emoji = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    user = relationship("User")

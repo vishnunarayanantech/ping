@@ -1284,7 +1284,6 @@ p {
 }
 
 .message-bubble--sent {
-  align-self: flex-end;
   background: var(--color-primary);
   color: #fff;
   border-bottom-right-radius: 4px;
@@ -1296,7 +1295,6 @@ p {
 }
 
 .message-bubble--received {
-  align-self: flex-start;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   color: var(--color-text-primary);
@@ -1305,6 +1303,164 @@ p {
 
 .message-bubble--received .message-bubble__time {
   color: var(--color-text-muted);
+}
+
+/* Row wrapping one message: the bubble, its hover-reveal reaction trigger,
+   and the reaction pills beneath it. The bubble used to align itself
+   (align-self) as a direct flex child of .chat-messages; now that it's
+   nested inside .message-row__bubble-wrap so the trigger button can sit
+   beside it, alignment moves up to the row instead. */
+.message-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 68%;
+}
+
+.message-row--sent {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.message-row--received {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.message-row__bubble-wrap {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.message-row--sent .message-row__bubble-wrap {
+  flex-direction: row-reverse;
+}
+
+.message-row .message-bubble {
+  max-width: 100%;
+}
+
+.message-react-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.9);
+  transition: opacity var(--transition-fast), transform var(--transition-fast),
+    visibility var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.message-row:hover .message-react-btn,
+.message-react-btn.is-open {
+  opacity: 1;
+  visibility: visible;
+  transform: scale(1);
+}
+
+.message-react-btn:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-text-primary);
+}
+
+.message-react-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.emoji-picker {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  display: flex;
+  gap: 2px;
+  padding: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.message-row--sent .emoji-picker {
+  right: 0;
+}
+
+.message-row--received .emoji-picker {
+  left: 0;
+}
+
+/* Flipped down (via JS, when there's no room above — see chat.js
+   positionPicker) so it doesn't get clipped by .chat-messages' own
+   overflow behind the fixed chat header for messages near the top. */
+.emoji-picker--below {
+  bottom: auto;
+  top: calc(100% + 8px);
+}
+
+.emoji-picker__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  font-size: 1.05rem;
+  line-height: 1;
+  border-radius: var(--radius-full);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.emoji-picker__btn:hover {
+  background: var(--color-surface-alt);
+  transform: scale(1.15);
+}
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.reaction-pill:hover {
+  background: var(--color-surface-alt);
+}
+
+.reaction-pill--mine {
+  background: var(--color-primary-light);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.reaction-pill__emoji {
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.reaction-pill__count {
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-input-bar {
@@ -1905,7 +2061,7 @@ p {
     display: inline-flex;
   }
 
-  .message-bubble {
+  .message-row {
     max-width: 82%;
   }
 }
