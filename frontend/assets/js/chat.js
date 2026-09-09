@@ -165,6 +165,27 @@ const Chat = (function ($) {
     renderMessages(true);
   }
 
+  /**
+   * Called by upload.js once a file-share upload succeeds. Only renders it
+   * if the target conversation is still the one open here — same "ignore
+   * if the user switched away" filtering as handleForwarded above, just for
+   * a single message instead of a batch.
+   */
+  function handleFileUploaded(message) {
+    if (message.conversation_id !== state.conversationId) return;
+
+    state.messages.push(message);
+    state.lastMarkedMessageId = message.id; // our own upload never needs marking read
+    cancelReply(); // mirror send()'s success behavior — same reasoning as there
+    renderMessages(true);
+  }
+
+  /** The conversation currently open, or null — upload.js needs this to
+   * know which conversation a file picked from the composer belongs to. */
+  function getConversationId() {
+    return state.conversationId;
+  }
+
   /** Set the message the composer is replying to and show its preview above
    * the input. Called from the row-hover reply button. */
   function startReply(message) {
@@ -395,6 +416,12 @@ const Chat = (function ($) {
       // never set on a forwarded message), so this is always either/or with
       // the reply-quote branch below.
       $bubble.append(buildForwardBlock(message.forwarded_from));
+    } else if (message.file) {
+      // A file-share message's content is just "📎 <filename>" (see backend
+      // services/file_service.py) — the file block below already conveys
+      // that, so skip rendering .content as well. Uploads never set
+      // reply_to either, so this is always either/or with that branch too.
+      $bubble.append(buildFileBlock(message.file));
     } else {
       if (message.reply_to) {
         $bubble.append(buildQuoteBlock(message.reply_to));
@@ -493,6 +520,92 @@ const Chat = (function ($) {
     $quote.appendTo($block);
 
     return $block;
+  }
+
+  /** File-share block shown inside a file message's own bubble (see the
+   * message.file branch in renderMessageRow): icon (by MIME type), name,
+   * size, and a download button that fetches the file as a Blob (rather
+   * than a plain <a href>) so the request can carry the Authorization
+   * header the download endpoint requires. */
+  function buildFileBlock(file) {
+    const $block = $('<div>', { class: 'message-file' });
+
+    const $icon = $('<div>', { class: 'message-file__icon' });
+    $('<i>', { 'data-lucide': fileIconName(file.mime_type), 'aria-hidden': 'true' }).appendTo($icon);
+    $icon.appendTo($block);
+
+    const $body = $('<div>', { class: 'message-file__body' });
+    $('<span>', { class: 'message-file__name' }).text(file.original_filename).appendTo($body);
+    $('<span>', { class: 'message-file__meta' }).text(formatFileSize(file.file_size)).appendTo($body);
+    $body.appendTo($block);
+
+    const $downloadBtn = $('<button>', {
+      type: 'button',
+      class: 'message-file__download',
+      'aria-label': 'Download ' + file.original_filename,
+      title: 'Download'
+    });
+    $('<i>', { 'data-lucide': 'download', 'aria-hidden': 'true' }).appendTo($downloadBtn);
+    $downloadBtn.on('click', function (e) {
+      e.stopPropagation();
+      downloadFile(file.id, file.original_filename);
+    });
+    $downloadBtn.appendTo($block);
+
+    return $block;
+  }
+
+  function fileIconName(mimeType) {
+    if (!mimeType) return 'file';
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('video/')) return 'video';
+    if (mimeType.startsWith('audio/')) return 'music';
+    if (mimeType.startsWith('text/')) return 'file-text';
+    if (mimeType === 'application/pdf') return 'file-text';
+    if (mimeType.indexOf('zip') !== -1 || mimeType.indexOf('compressed') !== -1 || mimeType.indexOf('archive') !== -1) {
+      return 'file-archive';
+    }
+    return 'file';
+  }
+
+  function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unitIndex = -1;
+    do {
+      value /= 1024;
+      unitIndex++;
+    } while (value >= 1024 && unitIndex < units.length - 1);
+    return value.toFixed(value < 10 ? 1 : 0) + ' ' + units[unitIndex];
+  }
+
+  /**
+   * Downloads a file via an authenticated fetch (a plain <a href> can't
+   * carry the Authorization header the endpoint requires) and hands the
+   * browser the result as a Blob so it saves under the original filename
+   * instead of navigating to it.
+   */
+  function downloadFile(fileId, filename) {
+    const token = Ping.getToken();
+    fetch(API_BASE_URL + '/messages/files/' + fileId + '/download', {
+      headers: token ? { Authorization: 'Bearer ' + token } : {}
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('Download failed');
+        return res.blob();
+      })
+      .then(function (blob) {
+        const url = URL.createObjectURL(blob);
+        const $link = $('<a>', { href: url, download: filename }).css('display', 'none');
+        $('body').append($link);
+        $link[0].click();
+        $link.remove();
+        URL.revokeObjectURL(url);
+      })
+      .catch(function () {
+        Ping.showToast('Unable to download file.', 'error');
+      });
   }
 
   function buildEmojiPicker(messageId) {
@@ -635,6 +748,8 @@ const Chat = (function ($) {
     openConversation: openConversation,
     closeConversation: closeConversation,
     handleForwarded: handleForwarded,
+    handleFileUploaded: handleFileUploaded,
+    getConversationId: getConversationId,
     stopPolling: stopPolling
   };
 })(jQuery);

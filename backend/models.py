@@ -106,3 +106,33 @@ class MessageReaction(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     user = relationship("User")
+
+
+class MessageFile(Base):
+    """
+    The uploaded-file attachment for a file-share message. Every file
+    upload creates its OWN Message (see services/file_service.py) — there's
+    no "attach a file to an existing text message" path — so this is a 1:1
+    relationship with Message, enforced by the unique constraint below.
+
+    file_path is stored RELATIVE to config.UPLOAD_DIR (not absolute), so
+    the upload directory can move between environments without a data
+    migration. stored_filename is a UUID-based name that never collides and
+    never echoes anything the client sent; original_filename is display-only
+    (see services/file_service.py for the sanitization that makes it safe to
+    show back to users and hand out in a Content-Disposition header). No
+    ORM relationship back on Message on purpose — same reasoning as
+    MessageReaction's docstring above: schemas.MessageOut.file is built
+    explicitly in routers/messages.py, not through from_attributes coercion.
+    """
+
+    __tablename__ = "message_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=False, unique=True, index=True)
+    original_filename = Column(String, nullable=False)
+    stored_filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    mime_type = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

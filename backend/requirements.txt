@@ -9,3 +9,5 @@ passlib==1.7.4
 bcrypt<4.1.0
 pyjwt
 python-dotenv
+# Required by FastAPI/Starlette to parse multipart/form-data (file uploads).
+python-multipart

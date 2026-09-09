@@ -21,6 +21,7 @@ $(function () {
 
   Chat.init(user);
   Forward.init();
+  Upload.init();
 
   // Both the recent-conversations list and user search ultimately just need
   // to open a conversation — they share this one callback.

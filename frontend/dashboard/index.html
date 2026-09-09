@@ -88,7 +88,22 @@
           </button>
         </div>
 
+        <div class="upload-progress" id="uploadProgress" hidden>
+          <i data-lucide="file-up" class="upload-progress__icon" aria-hidden="true"></i>
+          <div class="upload-progress__body">
+            <span class="upload-progress__name" id="uploadProgressName"></span>
+            <div class="upload-progress__track">
+              <div class="upload-progress__fill" id="uploadProgressFill"></div>
+            </div>
+          </div>
+        </div>
+
         <form class="chat-input-bar" id="messageForm" novalidate>
+          <label for="fileInput" class="visually-hidden">Attach a file</label>
+          <input type="file" id="fileInput" hidden>
+          <button type="button" class="icon-btn chat-file-btn" id="fileUploadBtn" aria-label="Attach file" title="Attach file">
+            <i data-lucide="paperclip" aria-hidden="true"></i>
+          </button>
           <label for="messageInput" class="visually-hidden">Message</label>
           <input type="text" id="messageInput" name="message" placeholder="Type a message..." autocomplete="off" maxlength="5000">
           <button type="submit" class="btn btn--primary chat-send-btn" id="sendBtn" disabled aria-label="Send message">
@@ -138,6 +153,7 @@
   <script src="../assets/js/users.js"></script>
   <script src="../assets/js/conversations.js"></script>
   <script src="../assets/js/forward.js"></script>
+  <script src="../assets/js/upload.js"></script>
   <script src="../assets/js/chat.js"></script>
   <script src="../assets/js/dashboard.js"></script>
 </body>

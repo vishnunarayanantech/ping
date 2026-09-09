@@ -12,6 +12,9 @@ backend/.env
 backend/*.db
 backend/*.sqlite3
 
+# Uploaded files (never commit user-shared content)
+backend/uploads/
+
 # Editor/OS
 .DS_Store
 .vscode/

@@ -126,6 +126,27 @@ class ForwardPreview(BaseModel):
         from_attributes = True
 
 
+class MessageFileOut(BaseModel):
+    """The file-share info a file message's UI needs — file_path and
+    stored_filename deliberately excluded, since those are storage-layer
+    details the client has no business seeing (and shouldn't need, since
+    downloading always goes through /messages/files/{id}/download)."""
+
+    id: int
+    original_filename: str
+    mime_type: str
+    file_size: int
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_utc(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+    class Config:
+        from_attributes = True
+
+
 class MessageOut(BaseModel):
     id: int
     conversation_id: int
@@ -145,6 +166,9 @@ class MessageOut(BaseModel):
     # all (a fresh Message from send_message, or model_validate on the ORM
     # row before reactions are attached) — see MessageReaction's docstring.
     reactions: List[ReactionSummary] = Field(default_factory=list)
+    # Populated only for a file-share message (one created via
+    # POST /messages/upload) — see services/file_service.py.
+    file: Optional[MessageFileOut] = None
 
     @field_validator("created_at")
     @classmethod

@@ -1609,6 +1609,99 @@ p {
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* File-share block shown inside a file message's own bubble (see the
+   message.file branch in chat.js's renderMessageRow): icon + name/size +
+   download button. Base colors assume the light .message-bubble--received
+   surface; .message-bubble--sent overrides to translucent-white the same
+   way .forward-quote/.message-quote do above. */
+.message-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  min-width: 220px;
+  max-width: 100%;
+}
+
+.message-file__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.message-bubble--sent .message-file__icon {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.message-file__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.message-file__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.message-file__name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-file__meta {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.message-bubble--sent .message-file__meta {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.message-file__download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-alt);
+  color: var(--color-text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.message-file__download:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.message-bubble--sent .message-file__download {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.message-bubble--sent .message-file__download:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.message-file__download svg {
+  width: 15px;
+  height: 15px;
+}
+
 /* Reply-target preview shown above the composer while replying; mirrors
    .message-quote's visual language (colored bar + sender/content lines)
    but sits in its own bar since it's not inside a bubble. */
@@ -1718,6 +1811,79 @@ p {
 .chat-send-btn svg {
   width: 18px;
   height: 18px;
+}
+
+/* Attach-file trigger in the composer — hidden until the composer area is
+   hovered/focused, same hover-reveal technique as the message row's
+   react/reply/forward buttons above. */
+.chat-file-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.9);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), visibility var(--transition-fast);
+}
+
+.chat-input-bar:hover .chat-file-btn,
+.chat-input-bar:focus-within .chat-file-btn {
+  opacity: 1;
+  visibility: visible;
+  transform: scale(1);
+}
+
+/* Upload-in-progress bar shown above the composer (see #uploadProgress in
+   dashboard/index.html and upload.js) — same slot/visual language as
+   .reply-preview just below. */
+.upload-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--color-surface-alt);
+  border-top: 1px solid var(--color-border);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.upload-progress__icon {
+  flex-shrink: 0;
+  color: var(--color-primary);
+}
+
+.upload-progress__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.upload-progress__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.upload-progress__name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-progress__track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.upload-progress__fill {
+  height: 100%;
+  width: 0%;
+  background: var(--color-primary);
+  border-radius: var(--radius-full);
+  transition: width 0.15s ease;
 }
 
 /* 11a. Forward-message modal --------------------------------------------------------------- */

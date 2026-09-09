@@ -37,13 +37,16 @@ PING/
 ├── backend/
 │   ├── main.py              FastAPI app, CORS, error handlers, router wiring
 │   ├── database.py          SQLAlchemy engine/session (SQLite by default)
-│   ├── models.py            User, Conversation, ConversationMember, Message, MessageReaction tables
+│   ├── config.py            Upload dir / max size / blocked extensions (env-configurable)
+│   ├── models.py            User, Conversation, ConversationMember, Message, MessageReaction, MessageFile tables
 │   ├── schemas.py           Pydantic request/response models
 │   ├── security.py          Password hashing + JWT create/verify + get_current_user
+│   ├── uploads/              Uploaded files (gitignored) — see config.py's UPLOAD_DIR
 │   ├── services/
 │   │   ├── conversation_service.py  get-or-create direct conversation, sidebar query
 │   │   ├── reaction_service.py      add/remove a reaction, aggregate reactions per message
-│   │   └── reply_service.py         validate a reply's target, batch-fetch quoted-preview info
+│   │   ├── reply_service.py         validate a reply's target, batch-fetch quoted-preview info
+│   │   └── file_service.py          validate/stream-save an upload, build its message + row
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── routers/
@@ -51,7 +54,8 @@ PING/
 │       ├── users.py         GET  /api/v1/users/search?q=
 │       ├── conversations.py GET /api/v1/conversations, POST /api/v1/conversations/direct/{user_id}
 │       └── messages.py      POST /api/v1/messages, GET /api/v1/messages/conversation/{id},
-│                             POST/DELETE /api/v1/messages/{id}/reactions[/{emoji}]
+│                             POST/DELETE /api/v1/messages/{id}/reactions[/{emoji}],
+│                             POST /api/v1/messages/upload, GET /api/v1/messages/files/{id}/download
 │
 ├── frontend/
 │   ├── index.html           Routes to dashboard or login based on session
@@ -74,7 +78,8 @@ PING/
 │       │   ├── users.js     Debounced user search (owns the results dropdown)
 │       │   ├── conversations.js  Recent-chats sidebar: load, render, active state, get-or-create
 │       │   ├── chat.js      Open conversation: message rendering, send, polling, reply-to-message UI
-│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat together
+│       │   ├── upload.js    Composer's attach-file button: picker, progress bar, POST /messages/upload
+│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat + Upload together
 │       └── images/logo.svg
 │
 ├── .gitignore
@@ -151,6 +156,8 @@ Base path: `/api/v1`
 | GET    | `/messages/conversation/{conversation_id}` | JWT | — (each message includes its `reactions` and, if a reply, its `reply_to` quoted preview) |
 | POST   | `/messages/{message_id}/reactions`      | JWT  | `{ emoji }` (one of the 8 allowed — see below) |
 | DELETE | `/messages/{message_id}/reactions/{emoji}` | JWT | —                                 |
+| POST   | `/messages/upload`                      | JWT  | multipart form: `conversation_id`, `file` (creates a file-share message) |
+| GET    | `/messages/files/{file_id}/download`    | JWT  | — (streams the file; caller must belong to its message's conversation) |
 
 Every response uses the same envelope shape: `{ "success": bool, "message"|"messages"|"users"|"conversations"|"conversation"|"reactions": ... }`.
 Errors are always `{ "success": false, "message": "..." }` with an appropriate status code
@@ -214,6 +221,21 @@ members live in `conversation_members`, not on the message itself. This replaced
   the raw row, so `reply_service.get_reply_previews_by_message()` builds it explicitly, batched
   across every message in a `GET /messages/conversation/{id}` response in one query, the same
   batching principle as reactions above.
+- **File sharing**: `message_files` is a 1:1 extension of `messages` (unique FK on
+  `message_id`) — every upload creates its own message rather than attaching to an existing
+  one, the same "no ORM relationship, build the shape explicitly" pattern as replies/forwards
+  (`services/file_service.py`). Files live on disk under `backend/uploads/` (configurable via
+  `UPLOAD_DIR`, see `backend/config.py`), organized `conversations/{id}/{year}/{month}/`, and
+  are never served as static files — `GET /messages/files/{id}/download` is the only way to
+  read one back, and it re-checks conversation membership the same as every other endpoint
+  here. `stored_filename` is a UUID, so two users uploading identically-named files can never
+  collide; `original_filename` is sanitized (path components and control characters stripped)
+  before being stored purely for display and for the download's `Content-Disposition` header —
+  it never influences where the file actually lands on disk. Uploads are streamed to disk in
+  fixed-size chunks with the actual byte count checked against `MAX_UPLOAD_SIZE_MB` as they're
+  written (never trusting `Content-Length` or the client alone), and rejected outright by
+  extension (`BLOCKED_UPLOAD_EXTENSIONS`) regardless of the client's claimed MIME type — the
+  stored MIME type is always guessed server-side from the sanitized filename instead.
 
 ### Schema history
 
@@ -246,6 +268,9 @@ already existed with real rows when `reply_to_message_id` was added — so `main
 same idempotent `ALTER TABLE ... ADD COLUMN` step to also cover `messages`. Every pre-existing
 message ends up with `reply_to_message_id = NULL`, which is exactly "not a reply" — no backfill
 needed, and old messages render exactly as before.
+
+File sharing needed neither trick either, same reasoning as reactions: `message_files` is a
+brand new table, so `create_all()` handles it on its own on top of an existing `ping.db`.
 
 ## Real-time strategy
 
@@ -305,3 +330,11 @@ the real deployed frontend origin — before shipping to production. Never set
 - Reaction emoji are restricted server-side (`schemas.ALLOWED_REACTION_EMOJIS`) to the same
   8 the picker offers — a direct API call can't stash arbitrary text in what's displayed back
   to every conversation member as an "emoji".
+- File uploads (`services/file_service.py`) never trust the client-supplied filename or MIME
+  type: the stored path is entirely server-generated (a UUID under `UPLOAD_DIR`, never the
+  client's filename), the client's Content-Type header is ignored in favor of a server-side
+  guess from the sanitized filename, and a configurable extension blocklist rejects
+  executable/script uploads outright. `backend/uploads/` sits outside the frontend/static
+  tree and is never mounted as a static directory — the only way to read a file back is
+  `GET /messages/files/{id}/download`, which independently re-checks that the caller belongs
+  to the file's conversation, same as every other message endpoint.

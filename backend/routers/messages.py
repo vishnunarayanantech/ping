@@ -1,24 +1,29 @@
 """
 Message endpoints: send a message into a conversation, fetch a
 conversation's history (each message including its reaction summaries),
-add/remove the caller's own emoji reaction to a message, and forward a
-message into one or more other conversations. All require the caller to be
-a member of the relevant conversation(s) — never assume a
-conversation_id/message_id alone means the caller has access.
+add/remove the caller's own emoji reaction to a message, forward a message
+into one or more other conversations, and upload/download file-share
+messages. All require the caller to be a member of the relevant
+conversation(s) — never assume a conversation_id/message_id alone means the
+caller has access.
 """
+import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from config import MAX_UPLOAD_SIZE_MB
 from database import get_db
-from models import Conversation, Message, User
+from models import Conversation, Message, MessageFile, User
 from schemas import (
     ConversationResponse,
     ForwardMessageCreate,
     ForwardMessageResponse,
     ForwardPreview,
     MessageCreate,
+    MessageFileOut,
     MessageOut,
     MessageReactionsResponse,
     ReactionCreate,
@@ -26,7 +31,7 @@ from schemas import (
     SendMessageResponse,
 )
 from security import get_current_user
-from services import forward_service, reaction_service, reply_service
+from services import file_service, forward_service, reaction_service, reply_service
 from services.conversation_service import is_conversation_member
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -111,15 +116,68 @@ def get_conversation_messages(
     )
     reply_previews_by_message = reply_service.get_reply_previews_by_message(db, messages)
     forward_previews_by_message = forward_service.get_forward_previews_by_message(db, messages)
+    files_by_message = file_service.get_files_by_message(db, [m.id for m in messages])
     message_outs = []
     for m in messages:
         message_out = MessageOut.model_validate(m)
         message_out.reactions = reactions_by_message.get(m.id, [])
         message_out.reply_to = reply_previews_by_message.get(m.id)
         message_out.forwarded_from = forward_previews_by_message.get(m.id)
+        message_out.file = files_by_message.get(m.id)
         message_outs.append(message_out)
 
     return ConversationResponse(success=True, messages=message_outs)
+
+
+@router.post("/upload", response_model=SendMessageResponse, status_code=status.HTTP_201_CREATED)
+async def upload_file(
+    conversation_id: int = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not is_conversation_member(db, conversation_id, current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this conversation")
+
+    try:
+        message = await file_service.save_message_file(db, conversation_id, current_user.id, file)
+    except file_service.UploadRejected as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.message)
+    except file_service.UploadTooLarge:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds the {MAX_UPLOAD_SIZE_MB:.0f} MB limit",
+        )
+
+    message_file = file_service.get_file_for_message(db, message.id)
+    message_out = MessageOut.model_validate(message)
+    message_out.file = MessageFileOut.model_validate(message_file)
+
+    return SendMessageResponse(success=True, message=message_out)
+
+
+@router.get("/files/{file_id}/download")
+def download_file(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message_file = db.query(MessageFile).filter(MessageFile.id == file_id).first()
+    if not message_file:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    # Membership is checked against the file's OWNING message's conversation
+    # — the same "conversation_id alone never grants access" rule as every
+    # other endpoint here, just reached via message_id -> conversation_id.
+    message = _get_message_or_404(db, message_file.message_id)
+    if not is_conversation_member(db, message.conversation_id, current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this file")
+
+    absolute_path = file_service.resolve_absolute_path(message_file.file_path)
+    if not absolute_path or not os.path.isfile(absolute_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    return FileResponse(absolute_path, media_type=message_file.mime_type, filename=message_file.original_filename)
 
 
 @router.post("/{message_id}/forward", response_model=ForwardMessageResponse, status_code=status.HTTP_201_CREATED)

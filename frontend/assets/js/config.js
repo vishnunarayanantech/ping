@@ -16,3 +16,8 @@ const API_BASE_URL = 'http://127.0.0.1:8000/api/v1';
 // How often the sidebar re-fetches /conversations to catch new messages
 // (unread counts, ordering, previews) while no WebSocket connection exists.
 const CONVERSATION_POLL_INTERVAL = 5000;
+
+// Mirrors backend/config.py's MAX_UPLOAD_SIZE_MB default — used only to
+// reject an oversized file before spending time uploading it; the backend
+// enforces its own configured limit regardless of what this says.
+const MAX_UPLOAD_SIZE_MB = 25;
