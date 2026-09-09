@@ -55,6 +55,7 @@ class UserSearchResponse(BaseModel):
 class MessageCreate(BaseModel):
     conversation_id: int
     content: str = Field(min_length=1, max_length=5000)
+    reply_to_message_id: Optional[int] = None
 
 
 # The picker only ever offers these — restricting the backend to the same set
@@ -97,12 +98,31 @@ class MessageReactionsResponse(BaseModel):
     reactions: List[ReactionSummary]
 
 
+class ReplyPreview(BaseModel):
+    """The compact quoted-message info a reply's UI needs — not the full
+    MessageOut shape, since it's only ever rendered as a one-line quote,
+    never as a message in its own right here."""
+
+    id: int
+    sender_id: int
+    sender_name: str
+    content: str
+
+    class Config:
+        from_attributes = True
+
+
 class MessageOut(BaseModel):
     id: int
     conversation_id: int
     sender_id: int
     content: str
     created_at: datetime
+    reply_to_message_id: Optional[int] = None
+    # Populated only when reply_to_message_id is set — see
+    # services/reply_service.py. None both for ordinary messages and for a
+    # reply whose original message no longer resolves.
+    reply_to: Optional[ReplyPreview] = None
     # Defaults to [] when the source object has no `.reactions` attribute at
     # all (a fresh Message from send_message, or model_validate on the ORM
     # row before reactions are attached) — see MessageReaction's docstring.

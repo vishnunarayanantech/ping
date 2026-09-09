@@ -27,11 +27,16 @@ const Chat = (function ($) {
     // flag, not fetched state, so it survives renderMessages() being called
     // again (poll ticks, sends, reactions) instead of getting wiped along
     // with the rest of the message DOM every time.
-    openPickerMessageId: null
+    openPickerMessageId: null,
+    // The message (a full entry from state.messages) the composer is
+    // currently replying to, or null. Also just a render flag — cleared on
+    // send, cancel, or switching/closing conversations.
+    replyTo: null
   };
 
   let $shell, $empty, $conversation, $headerAvatar, $headerName,
-    $messages, $form, $input, $sendBtn;
+    $messages, $form, $input, $sendBtn,
+    $replyPreview, $replyPreviewSender, $replyPreviewContent;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -45,6 +50,9 @@ const Chat = (function ($) {
     $form = $('#messageForm');
     $input = $('#messageInput');
     $sendBtn = $('#sendBtn');
+    $replyPreview = $('#replyPreview');
+    $replyPreviewSender = $('#replyPreviewSender');
+    $replyPreviewContent = $('#replyPreviewContent');
 
     $input.on('input', function () {
       $sendBtn.prop('disabled', $input.val().trim() === '');
@@ -56,6 +64,8 @@ const Chat = (function ($) {
     });
 
     $('#chatBackBtn').on('click', closeConversation);
+
+    $('#replyPreviewClose').on('click', cancelReply);
 
     // Emoji picker: close on outside click / Escape, same pattern as the
     // profile page's user-menu dropdown. The picker's own open/close click
@@ -79,6 +89,7 @@ const Chat = (function ($) {
     state.messages = [];
     state.lastMarkedMessageId = null;
     state.openPickerMessageId = null;
+    state.replyTo = null;
 
     $shell.addClass('app-shell--conversation-open');
     $empty.prop('hidden', true);
@@ -89,6 +100,7 @@ const Chat = (function ($) {
 
     $input.val('');
     $sendBtn.prop('disabled', true);
+    renderReplyPreview();
 
     fetchAndRender(true);
     startPolling();
@@ -109,9 +121,54 @@ const Chat = (function ($) {
     state.otherUser = null;
     state.lastMarkedMessageId = null;
     state.openPickerMessageId = null;
+    state.replyTo = null;
     $shell.removeClass('app-shell--conversation-open');
     $conversation.prop('hidden', true);
     $empty.prop('hidden', false);
+  }
+
+  function senderDisplayName(senderId) {
+    return senderId === state.currentUser.id ? 'You' : state.otherUser.name;
+  }
+
+  /** Set the message the composer is replying to and show its preview above
+   * the input. Called from the row-hover reply button. */
+  function startReply(message) {
+    state.replyTo = message;
+    renderReplyPreview();
+    $input.trigger('focus');
+  }
+
+  function cancelReply() {
+    if (state.replyTo === null) return;
+    state.replyTo = null;
+    renderReplyPreview();
+  }
+
+  function renderReplyPreview() {
+    if (!state.replyTo) {
+      $replyPreview.prop('hidden', true);
+      return;
+    }
+    $replyPreviewSender.text(senderDisplayName(state.replyTo.sender_id));
+    $replyPreviewContent.text(state.replyTo.content);
+    $replyPreview.prop('hidden', false);
+  }
+
+  /**
+   * Scroll a quoted message's original into view and briefly highlight it.
+   * Every message in the open conversation is always rendered at once (no
+   * pagination — see fetchAndRender), so the target is always in the DOM
+   * already; nothing to fetch.
+   */
+  function scrollToMessage(messageId) {
+    const $target = $messages.find('.message-row[data-message-id="' + messageId + '"]');
+    if (!$target.length) return;
+    $target[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $target.addClass('message-row--highlight');
+    setTimeout(function () {
+      $target.removeClass('message-row--highlight');
+    }, 1500);
   }
 
   function fetchAndRender(showLoading) {
@@ -169,16 +226,22 @@ const Chat = (function ($) {
     const content = $input.val().trim();
     if (!content || !state.conversationId) return;
 
+    const payload = { conversation_id: state.conversationId, content: content };
+    if (state.replyTo) {
+      payload.reply_to_message_id = state.replyTo.id;
+    }
+
     $sendBtn.prop('disabled', true);
 
     Api.request({
       url: '/messages',
       method: 'POST',
-      data: { conversation_id: state.conversationId, content: content }
+      data: payload
     })
       .done(function (response) {
         state.messages.push(response.message);
         state.lastMarkedMessageId = response.message.id; // our own message never needs marking read
+        cancelReply(); // only on success — a failed send keeps the reply context so retry doesn't lose it, same as the input text below
         renderMessages(true);
         $input.val('');
         Conversations.refresh();
@@ -289,8 +352,23 @@ const Chat = (function ($) {
     const $bubble = $('<div>', {
       class: 'message-bubble ' + (sent ? 'message-bubble--sent' : 'message-bubble--received')
     });
+    if (message.reply_to) {
+      $bubble.append(buildQuoteBlock(message.reply_to));
+    }
     $('<div>', { class: 'message-bubble__content' }).text(message.content).appendTo($bubble);
     $('<div>', { class: 'message-bubble__time' }).text(formatTime(message.created_at)).appendTo($bubble);
+
+    const $replyBtn = $('<button>', {
+      type: 'button',
+      class: 'message-reply-btn',
+      'aria-label': 'Reply'
+    });
+    $('<i>', { 'data-lucide': 'reply', 'aria-hidden': 'true' }).appendTo($replyBtn);
+    $replyBtn.on('click', function (e) {
+      e.stopPropagation();
+      closeOpenPicker();
+      startReply(message);
+    });
 
     const $reactBtn = $('<button>', {
       type: 'button',
@@ -310,7 +388,7 @@ const Chat = (function ($) {
       }
     });
 
-    $wrap.append($bubble, $reactBtn);
+    $wrap.append($bubble, $replyBtn, $reactBtn);
 
     if (pickerOpen) {
       $wrap.append(buildEmojiPicker(message.id));
@@ -324,6 +402,19 @@ const Chat = (function ($) {
     }
 
     return $row;
+  }
+
+  /** Compact quoted block shown above a reply's own content inside its
+   * bubble. Clicking it scrolls to and highlights the original message. */
+  function buildQuoteBlock(replyTo) {
+    const $quote = $('<button>', { type: 'button', class: 'message-quote' });
+    $('<span>', { class: 'message-quote__sender' }).text(senderDisplayName(replyTo.sender_id)).appendTo($quote);
+    $('<span>', { class: 'message-quote__content' }).text(replyTo.content).appendTo($quote);
+    $quote.on('click', function (e) {
+      e.stopPropagation();
+      scrollToMessage(replyTo.id);
+    });
+    return $quote;
   }
 
   function buildEmojiPicker(messageId) {

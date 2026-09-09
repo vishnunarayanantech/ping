@@ -77,6 +77,17 @@
 
         <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
 
+        <div class="reply-preview" id="replyPreview" hidden>
+          <span class="reply-preview__bar" aria-hidden="true"></span>
+          <div class="reply-preview__body">
+            <span class="reply-preview__sender" id="replyPreviewSender"></span>
+            <span class="reply-preview__content" id="replyPreviewContent"></span>
+          </div>
+          <button type="button" class="reply-preview__close" id="replyPreviewClose" aria-label="Cancel reply">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+
         <form class="chat-input-bar" id="messageForm" novalidate>
           <label for="messageInput" class="visually-hidden">Message</label>
           <input type="text" id="messageInput" name="message" placeholder="Type a message..." autocomplete="off" maxlength="5000">

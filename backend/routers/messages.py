@@ -18,10 +18,11 @@ from schemas import (
     MessageOut,
     MessageReactionsResponse,
     ReactionCreate,
+    ReplyPreview,
     SendMessageResponse,
 )
 from security import get_current_user
-from services import reaction_service
+from services import reaction_service, reply_service
 from services.conversation_service import is_conversation_member
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -49,7 +50,21 @@ def send_message(
         # you're not a member" — don't let a client learn which is true.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this conversation")
 
-    message = Message(conversation_id=payload.conversation_id, sender_id=current_user.id, content=content)
+    reply_to = None
+    if payload.reply_to_message_id is not None:
+        reply_to = reply_service.get_reply_target(db, payload.reply_to_message_id, payload.conversation_id)
+        if reply_to is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The message being replied to doesn't exist in this conversation",
+            )
+
+    message = Message(
+        conversation_id=payload.conversation_id,
+        sender_id=current_user.id,
+        content=content,
+        reply_to_message_id=payload.reply_to_message_id,
+    )
     db.add(message)
 
     conversation = db.query(Conversation).filter(Conversation.id == payload.conversation_id).first()
@@ -58,7 +73,13 @@ def send_message(
     db.commit()
     db.refresh(message)
 
-    return SendMessageResponse(success=True, message=MessageOut.model_validate(message))
+    message_out = MessageOut.model_validate(message)
+    if reply_to is not None:
+        message_out.reply_to = ReplyPreview(
+            id=reply_to.id, sender_id=reply_to.sender_id, sender_name=reply_to.sender.name, content=reply_to.content
+        )
+
+    return SendMessageResponse(success=True, message=message_out)
 
 
 @router.get("/conversation/{conversation_id}", response_model=ConversationResponse)
@@ -84,10 +105,12 @@ def get_conversation_messages(
     reactions_by_message = reaction_service.get_reactions_by_message(
         db, [m.id for m in messages], current_user.id
     )
+    reply_previews_by_message = reply_service.get_reply_previews_by_message(db, messages)
     message_outs = []
     for m in messages:
         message_out = MessageOut.model_validate(m)
         message_out.reactions = reactions_by_message.get(m.id, [])
+        message_out.reply_to = reply_previews_by_message.get(m.id)
         message_outs.append(message_out)
 
     return ConversationResponse(success=True, messages=message_outs)

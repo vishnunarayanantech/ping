@@ -62,6 +62,14 @@ class Message(Base):
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    # NULL for an ordinary message. When set, points at another message in
+    # the SAME conversation this one is replying to — routers/messages.py
+    # enforces that same-conversation rule at write time, since a bare FK
+    # can't express it. No ORM relationship on purpose: schemas.ReplyPreview
+    # needs the original sender's *name*, not the raw row, so it's built
+    # explicitly in services/reply_service.py — same reasoning as
+    # MessageReaction's docstring above.
+    reply_to_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
 
     conversation = relationship("Conversation", back_populates="messages")
     sender = relationship("User")

@@ -3,7 +3,8 @@
 Internal company communication platform — a lightweight alternative to Microsoft Teams.
 
 Current foundation: registration, login, user search, one-to-one direct messaging, emoji
-message reactions, and a recent-conversations sidebar, all end to end and backed by a real
+message reactions, replying to a specific message, and a recent-conversations sidebar, all
+end to end and backed by a real
 `conversations` / `conversation_members` schema (not just `sender_id`/`receiver_id` pairs —
 see "Data model" below). No WebSockets yet — the open conversation polls the REST API every
 5s. Group chats, channels, and real-time transport come in later iterations.
@@ -41,7 +42,8 @@ PING/
 │   ├── security.py          Password hashing + JWT create/verify + get_current_user
 │   ├── services/
 │   │   ├── conversation_service.py  get-or-create direct conversation, sidebar query
-│   │   └── reaction_service.py      add/remove a reaction, aggregate reactions per message
+│   │   ├── reaction_service.py      add/remove a reaction, aggregate reactions per message
+│   │   └── reply_service.py         validate a reply's target, batch-fetch quoted-preview info
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── routers/
@@ -71,7 +73,7 @@ PING/
 │       │   ├── auth.js      Login + register form logic
 │       │   ├── users.js     Debounced user search (owns the results dropdown)
 │       │   ├── conversations.js  Recent-chats sidebar: load, render, active state, get-or-create
-│       │   ├── chat.js      Open conversation: message rendering, send, polling
+│       │   ├── chat.js      Open conversation: message rendering, send, polling, reply-to-message UI
 │       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat together
 │       └── images/logo.svg
 │
@@ -145,8 +147,8 @@ Base path: `/api/v1`
 | GET    | `/conversations`                        | JWT  | — (each conversation includes `unread_count`) |
 | POST   | `/conversations/direct/{user_id}`       | JWT  | — (get-or-create, never duplicates)  |
 | POST   | `/conversations/{conversation_id}/read` | JWT  | — (sets caller's `last_read_at` for that conversation) |
-| POST   | `/messages`                             | JWT  | `{ conversation_id, content }`      |
-| GET    | `/messages/conversation/{conversation_id}` | JWT | — (each message includes its `reactions`) |
+| POST   | `/messages`                             | JWT  | `{ conversation_id, content, reply_to_message_id? }` |
+| GET    | `/messages/conversation/{conversation_id}` | JWT | — (each message includes its `reactions` and, if a reply, its `reply_to` quoted preview) |
 | POST   | `/messages/{message_id}/reactions`      | JWT  | `{ emoji }` (one of the 8 allowed — see below) |
 | DELETE | `/messages/{message_id}/reactions/{emoji}` | JWT | —                                 |
 
@@ -202,6 +204,16 @@ members live in `conversation_members`, not on the message itself. This replaced
   fetches and aggregates every message's reactions in one query regardless of how many messages
   are being listed — same batching principle as the sidebar query above — rather than one query
   per message.
+- **Replies**: `messages.reply_to_message_id` is a nullable self-referential FK — NULL for an
+  ordinary message. `POST /messages` validates it server-side via
+  `reply_service.get_reply_target()`, which scopes the lookup to the *same* `conversation_id`
+  the new message is being sent into, so a client can never make a message appear to quote one
+  from a conversation it doesn't belong to; an invalid or cross-conversation target is rejected
+  with `422`. No ORM relationship models this on purpose — same reasoning as `MessageReaction`'s
+  docstring: the quoted-preview shape (`ReplyPreview`) needs the original sender's *name*, not
+  the raw row, so `reply_service.get_reply_previews_by_message()` builds it explicitly, batched
+  across every message in a `GET /messages/conversation/{id}` response in one query, the same
+  batching principle as reactions above.
 
 ### Schema history
 
@@ -228,6 +240,12 @@ an existing table; a full Alembic setup is still deliberately not in place (see 
 Reactions needed neither trick: `message_reactions` is a brand new table, not a new column on
 an existing one, and `create_all()` handles creating whole new tables (including on a database
 that already has real rows in every other table) just fine on its own.
+
+Replies hit the same `create_all()`-can't-alter-a-table limit as `last_read_at` — `messages`
+already existed with real rows when `reply_to_message_id` was added — so `main.py` extends the
+same idempotent `ALTER TABLE ... ADD COLUMN` step to also cover `messages`. Every pre-existing
+message ends up with `reply_to_message_id = NULL`, which is exactly "not a reply" — no backfill
+needed, and old messages render exactly as before.
 
 ## Real-time strategy
 
@@ -282,7 +300,8 @@ the real deployed frontend origin — before shipping to production. Never set
   only; the backend independently re-validates everything via Pydantic and its own checks.
 - Message content is always inserted via jQuery `.text()`, never `.html()` — untrusted
   user input is never treated as markup. Reaction emoji, usernames, and counts follow the
-  same rule.
+  same rule, including the quoted sender/content shown in a reply's `.message-quote` block
+  and in the composer's reply preview.
 - Reaction emoji are restricted server-side (`schemas.ALLOWED_REACTION_EMOJIS`) to the same
   8 the picker offers — a direct API call can't stash arbitrary text in what's displayed back
   to every conversation member as an "emoji".

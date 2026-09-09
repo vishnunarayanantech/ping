@@ -1343,7 +1343,8 @@ p {
   max-width: 100%;
 }
 
-.message-react-btn {
+.message-react-btn,
+.message-reply-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1362,18 +1363,21 @@ p {
 }
 
 .message-row:hover .message-react-btn,
+.message-row:hover .message-reply-btn,
 .message-react-btn.is-open {
   opacity: 1;
   visibility: visible;
   transform: scale(1);
 }
 
-.message-react-btn:hover {
+.message-react-btn:hover,
+.message-reply-btn:hover {
   background: var(--color-surface-alt);
   color: var(--color-text-primary);
 }
 
-.message-react-btn svg {
+.message-react-btn svg,
+.message-reply-btn svg {
   width: 15px;
   height: 15px;
 }
@@ -1461,6 +1465,131 @@ p {
 
 .reaction-pill__count {
   font-variant-numeric: tabular-nums;
+}
+
+/* Compact quoted block shown above a reply's own content, inside its
+   bubble. Clicking it scrolls to and briefly highlights the original
+   message (see .message-row--highlight below and chat.js scrollToMessage). */
+.message-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  max-width: 100%;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border: none;
+  border-left: 3px solid var(--color-primary);
+  border-radius: 6px;
+  background: var(--color-primary-light);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.message-quote:hover {
+  background: var(--color-surface-hover);
+}
+
+.message-bubble--sent .message-quote {
+  border-left-color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.message-bubble--sent .message-quote:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.message-quote__sender {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.message-bubble--sent .message-quote__sender {
+  color: #fff;
+}
+
+.message-quote__content {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-bubble--sent .message-quote__content {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Brief highlight when a quoted message is clicked and scrolled into view. */
+.message-row--highlight .message-bubble {
+  animation: quoteHighlight 1.5s ease;
+}
+
+/* Reply-target preview shown above the composer while replying; mirrors
+   .message-quote's visual language (colored bar + sender/content lines)
+   but sits in its own bar since it's not inside a bubble. */
+.reply-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--color-surface-alt);
+  border-top: 1px solid var(--color-border);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.reply-preview__bar {
+  width: 3px;
+  align-self: stretch;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.reply-preview__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.reply-preview__sender {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.reply-preview__content {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-preview__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  color: var(--color-text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.reply-preview__close:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.reply-preview__close svg {
+  width: 16px;
+  height: 16px;
 }
 
 .chat-input-bar {
@@ -2025,6 +2154,15 @@ p {
   }
   50% {
     transform: translate(-16px, 20px);
+  }
+}
+
+@keyframes quoteHighlight {
+  0% {
+    box-shadow: 0 0 0 3px var(--color-primary-light);
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
   }
 }
 
