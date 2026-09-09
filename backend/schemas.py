@@ -112,6 +112,20 @@ class ReplyPreview(BaseModel):
         from_attributes = True
 
 
+class ForwardPreview(BaseModel):
+    """The compact original-message info a forwarded message's UI needs —
+    same shape and reasoning as ReplyPreview, just sourced from
+    forwarded_from_message_id instead of reply_to_message_id."""
+
+    id: int
+    sender_id: int
+    sender_name: str
+    content: str
+
+    class Config:
+        from_attributes = True
+
+
 class MessageOut(BaseModel):
     id: int
     conversation_id: int
@@ -123,6 +137,10 @@ class MessageOut(BaseModel):
     # services/reply_service.py. None both for ordinary messages and for a
     # reply whose original message no longer resolves.
     reply_to: Optional[ReplyPreview] = None
+    forwarded_from_message_id: Optional[int] = None
+    # Populated only when forwarded_from_message_id is set — see
+    # services/forward_service.py.
+    forwarded_from: Optional[ForwardPreview] = None
     # Defaults to [] when the source object has no `.reactions` attribute at
     # all (a fresh Message from send_message, or model_validate on the ORM
     # row before reactions are attached) — see MessageReaction's docstring.
@@ -140,6 +158,19 @@ class MessageOut(BaseModel):
 class SendMessageResponse(BaseModel):
     success: bool
     message: MessageOut
+
+
+class ForwardMessageCreate(BaseModel):
+    # Capped at 50 — a generous fan-out for a "forward to a few chats" action
+    # without leaving an unbounded list for a client to send.
+    conversation_ids: List[int] = Field(min_length=1, max_length=50)
+
+
+class ForwardMessageResponse(BaseModel):
+    success: bool
+    # One new message per target conversation, in the same order as the
+    # request's conversation_ids (after de-duplication).
+    messages: List[MessageOut]
 
 
 class ConversationResponse(BaseModel):

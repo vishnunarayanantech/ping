@@ -131,6 +131,40 @@ const Chat = (function ($) {
     return senderId === state.currentUser.id ? 'You' : state.otherUser.name;
   }
 
+  /**
+   * Display name for a *forwarded* message's original sender. Unlike
+   * senderDisplayName above, this can't assume the two-party context of the
+   * currently open conversation — the original message may have come from a
+   * conversation with a third person entirely. Falls back to the name the
+   * backend resolved (schemas.ForwardPreview.sender_name), only special-
+   * casing the current user as "You" the same way the rest of the app does.
+   */
+  function forwardedSenderDisplayName(forwardedFrom) {
+    return forwardedFrom.sender_id === state.currentUser.id ? 'You' : forwardedFrom.sender_name;
+  }
+
+  /** Open the forward-message modal for a message, called from the
+   * row-hover forward button. */
+  function startForward(message) {
+    Forward.open(message, senderDisplayName(message.sender_id));
+  }
+
+  /**
+   * Called by forward.js once a forward request succeeds. Only the newly
+   * created messages that landed in the conversation currently open here
+   * need to appear immediately — anything forwarded into other
+   * conversations will show up next time those are opened (or via their own
+   * poll, if already open in a way this module doesn't know about).
+   */
+  function handleForwarded(forwardedMessages) {
+    const relevant = forwardedMessages.filter(function (m) { return m.conversation_id === state.conversationId; });
+    if (!relevant.length) return;
+
+    relevant.forEach(function (m) { state.messages.push(m); });
+    state.lastMarkedMessageId = relevant[relevant.length - 1].id; // our own forwarded message never needs marking read
+    renderMessages(true);
+  }
+
   /** Set the message the composer is replying to and show its preview above
    * the input. Called from the row-hover reply button. */
   function startReply(message) {
@@ -352,10 +386,21 @@ const Chat = (function ($) {
     const $bubble = $('<div>', {
       class: 'message-bubble ' + (sent ? 'message-bubble--sent' : 'message-bubble--received')
     });
-    if (message.reply_to) {
-      $bubble.append(buildQuoteBlock(message.reply_to));
+    if (message.forwarded_from) {
+      // A forwarded message's own content is just a snapshot of the
+      // original (see backend routers/messages.py forward_message) —
+      // rendering the forward block already shows that text once, so don't
+      // also render message.content below it (same text, no need twice).
+      // Forwarding never carries over a reply thread either (reply_to is
+      // never set on a forwarded message), so this is always either/or with
+      // the reply-quote branch below.
+      $bubble.append(buildForwardBlock(message.forwarded_from));
+    } else {
+      if (message.reply_to) {
+        $bubble.append(buildQuoteBlock(message.reply_to));
+      }
+      $('<div>', { class: 'message-bubble__content' }).text(message.content).appendTo($bubble);
     }
-    $('<div>', { class: 'message-bubble__content' }).text(message.content).appendTo($bubble);
     $('<div>', { class: 'message-bubble__time' }).text(formatTime(message.created_at)).appendTo($bubble);
 
     const $replyBtn = $('<button>', {
@@ -368,6 +413,18 @@ const Chat = (function ($) {
       e.stopPropagation();
       closeOpenPicker();
       startReply(message);
+    });
+
+    const $forwardBtn = $('<button>', {
+      type: 'button',
+      class: 'message-forward-btn',
+      'aria-label': 'Forward'
+    });
+    $('<i>', { 'data-lucide': 'forward', 'aria-hidden': 'true' }).appendTo($forwardBtn);
+    $forwardBtn.on('click', function (e) {
+      e.stopPropagation();
+      closeOpenPicker();
+      startForward(message);
     });
 
     const $reactBtn = $('<button>', {
@@ -388,7 +445,7 @@ const Chat = (function ($) {
       }
     });
 
-    $wrap.append($bubble, $replyBtn, $reactBtn);
+    $wrap.append($bubble, $replyBtn, $forwardBtn, $reactBtn);
 
     if (pickerOpen) {
       $wrap.append(buildEmojiPicker(message.id));
@@ -415,6 +472,27 @@ const Chat = (function ($) {
       scrollToMessage(replyTo.id);
     });
     return $quote;
+  }
+
+  /** "Forwarded" tag + quoted original sender/content shown inside a
+   * forwarded message's own bubble — see the forwarded_from branch in
+   * renderMessageRow. Not interactive (unlike buildQuoteBlock's reply
+   * quote): the original message may live in a different conversation
+   * that isn't open here, so there's nothing sensible to scroll to. */
+  function buildForwardBlock(forwardedFrom) {
+    const $block = $('<div>', { class: 'message-forward-block' });
+
+    const $label = $('<div>', { class: 'message-forward-block__label' });
+    $('<i>', { 'data-lucide': 'forward', 'aria-hidden': 'true' }).appendTo($label);
+    $('<span>').text('Forwarded').appendTo($label);
+    $label.appendTo($block);
+
+    const $quote = $('<div>', { class: 'forward-quote' });
+    $('<span>', { class: 'forward-quote__sender' }).text(forwardedSenderDisplayName(forwardedFrom)).appendTo($quote);
+    $('<span>', { class: 'forward-quote__content' }).text(forwardedFrom.content).appendTo($quote);
+    $quote.appendTo($block);
+
+    return $block;
   }
 
   function buildEmojiPicker(messageId) {
@@ -556,6 +634,7 @@ const Chat = (function ($) {
     init: init,
     openConversation: openConversation,
     closeConversation: closeConversation,
+    handleForwarded: handleForwarded,
     stopPolling: stopPolling
   };
 })(jQuery);

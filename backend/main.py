@@ -52,6 +52,16 @@ def _add_missing_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE messages ADD COLUMN reply_to_message_id INTEGER REFERENCES messages(id)"))
 
+    # forward-message: same trick again for `messages.forwarded_from_message_id`.
+    # Every existing message ends up with NULL here, which is exactly "not a
+    # forward" — no backfill needed.
+    message_columns = {col["name"] for col in inspector.get_columns("messages")}
+    if "forwarded_from_message_id" not in message_columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN forwarded_from_message_id INTEGER REFERENCES messages(id)")
+            )
+
 
 _add_missing_columns()
 

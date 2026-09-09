@@ -70,6 +70,17 @@ class Message(Base):
     # explicitly in services/reply_service.py — same reasoning as
     # MessageReaction's docstring above.
     reply_to_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
+    # NULL for a message that wasn't forwarded. When set, points at the
+    # message this one was forwarded from — deliberately UNSCOPED to any
+    # particular conversation (unlike reply_to_message_id above), since
+    # forwarding's whole point is crossing from a source conversation into a
+    # different target one. routers/messages.py checks the caller is a member
+    # of the source message's conversation before allowing the forward, but
+    # that source can be any conversation the two happen to share. Same "no
+    # ORM relationship" reasoning as reply_to_message_id: schemas.ForwardPreview
+    # needs the original sender's name, built explicitly in
+    # services/forward_service.py.
+    forwarded_from_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
 
     conversation = relationship("Conversation", back_populates="messages")
     sender = relationship("User")

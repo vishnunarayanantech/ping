@@ -259,12 +259,20 @@ const Conversations = (function ($) {
     }
   }
 
+  /** The current sidebar list, e.g. for the forward-message modal's
+   * conversation picker — reuses what's already loaded/polled here instead
+   * of issuing a separate fetch. */
+  function getAll() {
+    return state.conversations;
+  }
+
   return {
     init: init,
     refresh: refresh,
     openWithUser: openWithUser,
     setActive: setActive,
     markRead: markRead,
+    getAll: getAll,
     stopPolling: stopPolling
   };
 })(jQuery);

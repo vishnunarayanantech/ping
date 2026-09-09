@@ -100,6 +100,34 @@
     </main>
   </div>
 
+  <!-- Forward-message modal: conversation picker + preview, opened from a
+       message row's Forward action (see chat.js / forward.js). -->
+  <div class="modal-overlay" id="forwardModalOverlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="forwardModalTitle">
+      <header class="modal__header">
+        <h2 class="modal__title" id="forwardModalTitle">Forward message</h2>
+        <button type="button" class="icon-btn modal__close" id="forwardModalClose" aria-label="Close">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </header>
+
+      <div class="forward-modal__preview">
+        <span class="forward-modal__preview-label">Forwarding</span>
+        <div class="forward-quote">
+          <span class="forward-quote__sender" id="forwardPreviewSender"></span>
+          <span class="forward-quote__content" id="forwardPreviewContent"></span>
+        </div>
+      </div>
+
+      <div class="forward-modal__list" id="forwardConversationList"></div>
+
+      <footer class="modal__footer">
+        <button type="button" class="btn btn--secondary" id="forwardCancelBtn">Cancel</button>
+        <button type="button" class="btn btn--primary" id="forwardConfirmBtn" disabled>Forward</button>
+      </footer>
+    </div>
+  </div>
+
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
@@ -109,6 +137,7 @@
   <script src="../assets/js/api.js"></script>
   <script src="../assets/js/users.js"></script>
   <script src="../assets/js/conversations.js"></script>
+  <script src="../assets/js/forward.js"></script>
   <script src="../assets/js/chat.js"></script>
   <script src="../assets/js/dashboard.js"></script>
 </body>

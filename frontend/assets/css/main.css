@@ -1344,7 +1344,8 @@ p {
 }
 
 .message-react-btn,
-.message-reply-btn {
+.message-reply-btn,
+.message-forward-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1364,6 +1365,7 @@ p {
 
 .message-row:hover .message-react-btn,
 .message-row:hover .message-reply-btn,
+.message-row:hover .message-forward-btn,
 .message-react-btn.is-open {
   opacity: 1;
   visibility: visible;
@@ -1371,13 +1373,15 @@ p {
 }
 
 .message-react-btn:hover,
-.message-reply-btn:hover {
+.message-reply-btn:hover,
+.message-forward-btn:hover {
   background: var(--color-surface-alt);
   color: var(--color-text-primary);
 }
 
 .message-react-btn svg,
-.message-reply-btn svg {
+.message-reply-btn svg,
+.message-forward-btn svg {
   width: 15px;
   height: 15px;
 }
@@ -1527,6 +1531,84 @@ p {
   animation: quoteHighlight 1.5s ease;
 }
 
+/* "Forwarded" tag + quoted original sender/content shown inside a forwarded
+   message's own bubble (see the forwarded_from branch in chat.js's
+   renderMessageRow). .forward-quote deliberately mirrors .message-quote's
+   visual language (colored bar + sender/content lines) but as a plain,
+   non-interactive block — a forward's original message may live in a
+   conversation that isn't open here, so unlike a reply's quote there's
+   nothing to click through to. */
+.message-forward-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.message-forward-block__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.message-bubble--sent .message-forward-block__label {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.message-forward-block__label svg {
+  width: 13px;
+  height: 13px;
+}
+
+.forward-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-left: 3px solid var(--color-primary);
+  border-radius: 6px;
+  background: var(--color-primary-light);
+}
+
+.message-bubble--sent .forward-quote {
+  border-left-color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.forward-quote__sender {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.message-bubble--sent .forward-quote__sender {
+  color: #fff;
+}
+
+/* Wraps fully by default (not truncated) — inside a forwarded message's own
+   bubble this IS the message's entire visible content (see the
+   forwarded_from branch in chat.js's renderMessageRow), unlike
+   .message-quote__content/.reply-preview__content which only ever preview
+   text that's shown in full elsewhere. Truncated back to one line only
+   inside the forward modal's own preview, below, where it really is just a
+   preview of something the user already read in full. */
+.forward-quote__content {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.message-bubble--sent .forward-quote__content {
+  color: rgba(255, 255, 255, 0.85);
+}
+
 /* Reply-target preview shown above the composer while replying; mirrors
    .message-quote's visual language (colored bar + sender/content lines)
    but sits in its own bar since it's not inside a bubble. */
@@ -1636,6 +1718,156 @@ p {
 .chat-send-btn svg {
   width: 18px;
   height: 18px;
+}
+
+/* 11a. Forward-message modal --------------------------------------------------------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-lg);
+  background: rgba(13, 14, 20, 0.5);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 420px;
+  max-height: min(600px, 85vh);
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.modal__title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.modal__footer .btn {
+  height: 40px;
+  padding: 0 var(--space-md);
+}
+
+.forward-modal__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.forward-modal__preview-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Reuses the same .forward-quote block a forwarded message renders inside
+   its bubble, so the preview here matches what recipients will actually
+   see once confirmed. Truncated to one line here specifically — unlike the
+   in-bubble rendering, this is just a confirmation preview of a message the
+   user already read in full before clicking Forward. */
+.forward-modal__preview .forward-quote {
+  background: var(--color-surface-alt);
+  border-left-color: var(--color-primary);
+}
+
+.forward-modal__preview .forward-quote__content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forward-modal__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-sm);
+}
+
+.forward-modal__empty {
+  padding: var(--space-lg);
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.forward-conversation-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transition: background var(--transition-fast);
+}
+
+.forward-conversation-item:hover {
+  background: var(--color-surface-alt);
+}
+
+.forward-conversation-item__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forward-conversation-item__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-border-strong);
+  color: transparent;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.forward-conversation-item__check svg {
+  width: 13px;
+  height: 13px;
+}
+
+.forward-conversation-item.is-selected .forward-conversation-item__check {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
 }
 
 /* 12. Profile page ------------------------------------------------------------------------ */
