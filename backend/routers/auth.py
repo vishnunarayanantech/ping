@@ -26,6 +26,8 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
     )
     db.add(user)
     try:
+        db.flush()  # assigns user.id without committing, needed to derive employee_id below
+        user.employee_id = f"EMP-{1000 + user.id}"
         db.commit()
     except IntegrityError:
         # Guards against a race where two requests register the same email

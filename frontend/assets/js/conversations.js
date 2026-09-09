@@ -187,7 +187,8 @@ const Conversations = (function ($) {
         'data-conversation-id': conversation.id
       });
 
-      $('<span>', { class: 'avatar avatar--sm' }).text(Ping.initials(otherUser.name)).appendTo($item);
+      const $avatar = $('<span>', { class: 'avatar avatar--sm' }).appendTo($item);
+      Avatars.apply($avatar, otherUser.name, otherUser.avatar_url);
 
       const $info = $('<span>', { class: 'conversation-item__info' });
       const $top = $('<span>', { class: 'conversation-item__top' });

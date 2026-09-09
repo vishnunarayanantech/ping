@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -45,6 +46,22 @@ def _categorize_mime_type(mime_type: str) -> str:
     return "other"
 
 
+def build_avatar_url(user_id: int, avatar_path: Optional[str]) -> Optional[str]:
+    """None when the user has no avatar — the frontend (avatars.js) falls
+    back to the initials avatar for that case. Otherwise a path to
+    GET /users/{id}/avatar, relative to API_BASE_URL same as every other
+    frontend request. Versioned with a short hash of the server-side
+    storage path — never the path itself, same "client has no business
+    seeing storage-layer details" reasoning as MessageFileOut excluding
+    file_path/stored_filename — purely so a replaced avatar's URL changes
+    and naturally busts the frontend's blob cache (see avatars.js), with no
+    extra "avatar_updated_at" column needed."""
+    if not avatar_path:
+        return None
+    version = hashlib.sha256(avatar_path.encode()).hexdigest()[:12]
+    return f"/users/{user_id}/avatar?v={version}"
+
+
 class UserRegister(BaseModel):
     name: str = Field(min_length=2)
     email: EmailStr
@@ -57,9 +74,19 @@ class UserLogin(BaseModel):
 
 
 class UserOut(BaseModel):
+    # avatar_path is populated straight from the ORM row (from_attributes
+    # matches it by name) but never itself serialized — see
+    # build_avatar_url's docstring. It only exists here to feed the
+    # avatar_url computed_field below.
     id: int
     name: str
     email: str
+    avatar_path: Optional[str] = Field(default=None, exclude=True)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def avatar_url(self) -> Optional[str]:
+        return build_avatar_url(self.id, self.avatar_path)
 
     class Config:
         from_attributes = True
@@ -82,6 +109,59 @@ class LoginResponse(AuthResponse):
 class UserSearchResponse(BaseModel):
     success: bool
     users: List[UserOut]
+
+
+class UserProfileOut(BaseModel):
+    """The full profile shown on profile.html — a superset of UserOut, kept
+    as its own schema (rather than adding fields to UserOut) so the other
+    endpoints that return UserOut (search results, message senders) don't
+    start exposing job_title/department/employee_id for every user, not
+    just the caller. Built explicitly from a User row in routers/users.py
+    rather than via from_attributes, since the field names here
+    (full_name/company_email) intentionally don't match the model's
+    (name/email)."""
+
+    id: int
+    full_name: str
+    job_title: str
+    department: str
+    company_email: str
+    employee_id: str
+    avatar_url: Optional[str] = None
+
+
+class ProfileUpdate(BaseModel):
+    """PUT /users/profile body. Deliberately has no field for company_email,
+    employee_id, or user_id — the target user is always the JWT-authenticated
+    caller (see routers/users.py's use of get_current_user), never a
+    client-supplied id, and the two read-only fields simply have no way to
+    reach the model no matter what a request body contains."""
+
+    full_name: str = Field(max_length=100)
+    job_title: str = Field(default="", max_length=100)
+    department: str = Field(default="", max_length=100)
+
+    class Config:
+        extra = "forbid"
+
+    @field_validator("full_name")
+    @classmethod
+    def _full_name_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if len(stripped) < 2:
+            raise ValueError("must be at least 2 characters")
+        return stripped
+
+    @field_validator("job_title", "department")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        return value.strip()
+
+
+class ProfileResponse(BaseModel):
+    success: bool
+    message: str
+    profile: UserProfileOut
 
 
 class MessageCreate(BaseModel):

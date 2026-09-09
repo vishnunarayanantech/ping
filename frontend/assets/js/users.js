@@ -68,7 +68,8 @@ const Users = (function ($) {
 
     users.forEach(function (user) {
       const $item = $('<button>', { type: 'button', class: 'search-result' });
-      $('<span>', { class: 'avatar avatar--sm' }).text(Ping.initials(user.name)).appendTo($item);
+      const $avatar = $('<span>', { class: 'avatar avatar--sm' }).appendTo($item);
+      Avatars.apply($avatar, user.name, user.avatar_url);
 
       const $info = $('<span>', { class: 'search-result__info' });
       $('<span>', { class: 'search-result__name' }).text(user.name).appendTo($info);

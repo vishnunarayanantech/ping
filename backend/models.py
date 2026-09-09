@@ -13,6 +13,23 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Editable via PUT /users/profile — see routers/users.py. Nullable so
+    # ALTER TABLE ADD COLUMN (main.py's _add_missing_columns) doesn't need a
+    # server-side default for existing rows; routers/users.py treats NULL
+    # the same as "" when building the response.
+    job_title = Column(String, nullable=True, default="")
+    department = Column(String, nullable=True, default="")
+    # Server-generated at registration (routers/auth.py) and never editable
+    # by the client — see schemas.ProfileUpdate, which deliberately has no
+    # field for this.
+    employee_id = Column(String, unique=True, index=True, nullable=True)
+    # Relative to config.AVATAR_DIR (not absolute), same "relative so the
+    # upload directory can move between environments" reasoning as
+    # MessageFile.file_path. NULL means "no avatar uploaded" — routers/users.py
+    # and schemas.build_avatar_url both treat that as "show the default
+    # initials avatar" rather than a broken image. Set only via
+    # POST /users/profile/avatar — see services/avatar_service.py.
+    avatar_path = Column(String, nullable=True)
 
 
 class Conversation(Base):

@@ -21,3 +21,7 @@ const CONVERSATION_POLL_INTERVAL = 5000;
 // reject an oversized file before spending time uploading it; the backend
 // enforces its own configured limit regardless of what this says.
 const MAX_UPLOAD_SIZE_MB = 25;
+
+// Mirrors backend/config.py's MAX_AVATAR_SIZE_MB default — same "just a
+// pre-flight check" caveat as MAX_UPLOAD_SIZE_MB above.
+const MAX_AVATAR_SIZE_MB = 5;

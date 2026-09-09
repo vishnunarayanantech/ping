@@ -15,7 +15,7 @@ $(function () {
 
   const user = Ping.getSession();
 
-  $('#sidebarUserInitials').text(Ping.initials(user.name));
+  Avatars.apply($('#sidebarUserInitials'), user.name, user.avatar_url);
   $('#sidebarUserName').text(user.name);
   $('#sidebarUserEmail').text(user.email);
 

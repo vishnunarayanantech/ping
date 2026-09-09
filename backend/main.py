@@ -62,6 +62,36 @@ def _add_missing_columns():
                 text("ALTER TABLE messages ADD COLUMN forwarded_from_message_id INTEGER REFERENCES messages(id)")
             )
 
+    # editable profile fields: same trick for users.job_title/department
+    # (both start '' for existing rows — "no title set yet", not NULL, so
+    # the frontend never has to special-case a null string) and
+    # users.employee_id (backfilled deterministically from each row's id so
+    # every existing user gets a stable, unique value with no manual data
+    # entry). New users get all three set at registration time instead —
+    # see routers/auth.py.
+    user_columns = {col["name"] for col in inspector.get_columns("users")}
+    if "job_title" not in user_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN job_title VARCHAR"))
+            conn.execute(text("UPDATE users SET job_title = '' WHERE job_title IS NULL"))
+    if "department" not in user_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN department VARCHAR"))
+            conn.execute(text("UPDATE users SET department = '' WHERE department IS NULL"))
+    if "employee_id" not in user_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN employee_id VARCHAR"))
+            conn.execute(text("UPDATE users SET employee_id = 'EMP-' || (1000 + id) WHERE employee_id IS NULL"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_employee_id ON users (employee_id)"))
+
+    # avatar upload: same trick for users.avatar_path. Every existing user
+    # ends up with NULL here, which is exactly "no avatar uploaded yet" — the
+    # frontend already falls back to the initials avatar for that case, so
+    # no backfill needed.
+    if "avatar_path" not in user_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN avatar_path VARCHAR"))
+
 
 _add_missing_columns()
 

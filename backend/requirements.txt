@@ -11,3 +11,7 @@ pyjwt
 python-dotenv
 # Required by FastAPI/Starlette to parse multipart/form-data (file uploads).
 python-multipart
+# Avatar upload: decodes/validates the actual image bytes (never trusts the
+# client's claimed Content-Type or filename extension) and does the
+# square-crop/resize/re-encode — see services/avatar_service.py.
+pillow

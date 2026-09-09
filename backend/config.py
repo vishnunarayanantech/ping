@@ -35,3 +35,19 @@ BLOCKED_UPLOAD_EXTENSIONS = {
 }
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Avatars get their OWN subdirectory, never mixed with conversation
+# file-share uploads above — see services/avatar_service.py.
+AVATAR_DIR = os.getenv("AVATAR_DIR", os.path.join(UPLOAD_DIR, "avatars"))
+
+MAX_AVATAR_SIZE_MB = float(os.getenv("MAX_AVATAR_SIZE_MB", "5"))
+MAX_AVATAR_SIZE_BYTES = int(MAX_AVATAR_SIZE_MB * 1024 * 1024)
+
+# Every avatar is normalized to a single square JPEG at this max dimension
+# (see avatar_service._square_crop_and_resize) regardless of how large the
+# uploaded source image was — bounds both storage use and the payload every
+# avatar view downloads, per the task's "prevent excessively large images
+# from consuming storage" requirement.
+AVATAR_MAX_DIMENSION = int(os.getenv("AVATAR_MAX_DIMENSION", "512"))
+
+os.makedirs(AVATAR_DIR, exist_ok=True)

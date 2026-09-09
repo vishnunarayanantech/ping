@@ -2266,6 +2266,83 @@ p {
   height: 10px;
 }
 
+.profile-avatar {
+  position: relative;
+}
+
+.avatar-edit-btn {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+  border: 3px solid var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.avatar-edit-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  transform: scale(1.05);
+}
+
+.avatar-edit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.avatar-edit-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Dims the avatar circle itself while a photo is being uploaded — the
+   button's own .is-loading spinner (in .avatar-pending__actions) already
+   communicates progress, this just keeps the covered-up preview from
+   looking interactive in the meantime. */
+.profile-avatar--busy .avatar--lg {
+  opacity: 0.5;
+}
+
+.avatar-pending {
+  position: absolute;
+  top: calc(100% + var(--space-sm));
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  white-space: nowrap;
+}
+
+.avatar-pending__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.avatar-pending__actions {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.avatar-pending__actions .btn {
+  height: 36px;
+  padding: 0 var(--space-md);
+  font-size: 0.8125rem;
+}
+
 /* 13. Auth layouts -------------------------------------------------------------------------- */
 .page-theme-toggle {
   position: fixed;

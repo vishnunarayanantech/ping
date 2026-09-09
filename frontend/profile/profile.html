@@ -58,7 +58,27 @@
 
       <div class="profile-card__body">
         <div class="profile-card__top">
-          <span class="avatar avatar--lg" id="cardAvatarInitials">JD</span>
+          <div class="profile-avatar" id="profileAvatarWrap">
+            <span class="avatar avatar--lg" id="cardAvatarInitials">JD</span>
+
+            <button type="button" class="avatar-edit-btn" id="avatarEditBtn" hidden aria-label="Change avatar" title="Change avatar">
+              <i data-lucide="camera" aria-hidden="true"></i>
+            </button>
+
+            <label for="avatarFileInput" class="visually-hidden">Choose an avatar image</label>
+            <input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/webp" hidden>
+
+            <div class="avatar-pending" id="avatarPending" hidden>
+              <span class="avatar-pending__label">Preview — not saved yet</span>
+              <div class="avatar-pending__actions">
+                <button type="button" class="btn btn--ghost" id="avatarCancelBtn">Cancel</button>
+                <button type="button" class="btn btn--primary" id="avatarSaveBtn">
+                  <span class="btn__label">Save photo</span>
+                  <span class="btn__spinner" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+          </div>
 
           <div class="profile-card__actions" id="viewActions">
             <button type="button" class="btn btn--secondary" id="editBtn">
@@ -132,7 +152,7 @@
                   Read-only
                 </span>
               </span>
-              <span class="profile-field__value">EMP-1024</span>
+              <span class="profile-field__value" id="displayEmployeeId">EMP-1024</span>
             </div>
 
           </div>
@@ -147,6 +167,8 @@
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="../assets/js/config.js"></script>
   <script src="../assets/js/main.js"></script>
+  <script src="../assets/js/api.js"></script>
+  <script src="../assets/js/avatars.js"></script>
   <script src="../assets/js/profile.js"></script>
 </body>
 </html>

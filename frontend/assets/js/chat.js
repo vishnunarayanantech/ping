@@ -95,7 +95,7 @@ const Chat = (function ($) {
     $empty.prop('hidden', true);
     $conversation.prop('hidden', false);
 
-    $headerAvatar.text(Ping.initials(otherUser.name));
+    Avatars.apply($headerAvatar, otherUser.name, otherUser.avatar_url);
     $headerName.text(otherUser.name);
 
     $input.val('');

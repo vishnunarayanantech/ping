@@ -87,7 +87,8 @@ const Forward = (function ($) {
         'aria-pressed': isSelected
       });
 
-      $('<span>', { class: 'avatar avatar--sm' }).text(Ping.initials(otherUser.name)).appendTo($item);
+      const $avatar = $('<span>', { class: 'avatar avatar--sm' }).appendTo($item);
+      Avatars.apply($avatar, otherUser.name, otherUser.avatar_url);
       $('<span>', { class: 'forward-conversation-item__name' }).text(otherUser.name).appendTo($item);
 
       const $check = $('<span>', { class: 'forward-conversation-item__check', 'aria-hidden': 'true' });
