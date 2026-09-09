@@ -140,8 +140,9 @@ Base path: `/api/v1`
 | POST   | `/auth/register`                        | —    | `{ name, email, password }`         |
 | POST   | `/auth/login`                           | —    | `{ email, password }`               |
 | GET    | `/users/search?q=`                      | JWT  | —                                    |
-| GET    | `/conversations`                        | JWT  | —                                    |
+| GET    | `/conversations`                        | JWT  | — (each conversation includes `unread_count`) |
 | POST   | `/conversations/direct/{user_id}`       | JWT  | — (get-or-create, never duplicates)  |
+| POST   | `/conversations/{conversation_id}/read` | JWT  | — (sets caller's `last_read_at` for that conversation) |
 | POST   | `/messages`                             | JWT  | `{ conversation_id, content }`      |
 | GET    | `/messages/conversation/{conversation_id}` | JWT | —                                 |
 
@@ -177,6 +178,12 @@ members live in `conversation_members`, not on the message itself. This replaced
 - Message ordering within a conversation is `(created_at, id)`, not just `created_at` — SQLite's
   timestamp resolution is coarse enough that two rapid messages can share a value, and `id` is
   the only thing that then reliably breaks the tie the same way for every reader.
+- **Unread tracking**: each `conversation_members` row has a `last_read_at` (NULL = "never read,
+  everything is unread"). `get_unread_counts()` counts, per conversation, messages with
+  `sender_id != user_id` and `created_at > last_read_at` — one grouped query across every
+  conversation on the sidebar, not one query per conversation. `POST /conversations/{id}/read`
+  (`mark_conversation_read()`) sets it to the conversation's latest message's `created_at` (or
+  the current server time if there are no messages yet) rather than trusting the browser's clock.
 
 ### Schema history
 
@@ -192,14 +199,38 @@ same if you're upgrading a database that predates this section and don't need to
 A production database with real rows to preserve would need an actual migration (e.g. Alembic)
 instead; none exists in this project yet.
 
+Unread tracking (above) hit the same `create_all()`-can't-alter-a-table limit when it added
+`conversation_members.last_read_at` — but by then `ping.db` held real registered accounts, so
+a reset wasn't an option. `backend/main.py` instead runs a small idempotent `ALTER TABLE ...
+ADD COLUMN` at startup (checked via `sqlalchemy.inspect()`, so it's a no-op once the column
+exists) — additive and safe on every restart, same as `create_all()` itself, just covering the
+one case it can't. This is the pattern to reach for first when a future column needs adding to
+an existing table; a full Alembic setup is still deliberately not in place (see above).
+
 ## Real-time strategy
 
-No WebSockets yet, by design. While a conversation is open, `chat.js` re-fetches and fully
-*replaces* the message list every 5 seconds (`Chat.startPolling()` / `stopPolling()`) —
-replacing rather than appending is what makes a just-sent message immune to ever appearing
-twice once the next poll confirms it from the server. Polling always stops when a
-conversation closes or on logout, and is never started twice. `startPolling()`/`stopPolling()`
-are the intended seam for a future WebSocket connection to plug into.
+No WebSockets yet, by design. Two independent polls, each on its own `setInterval`, never
+more than one instance of either at a time:
+
+- **`chat.js`** — while a conversation is open, re-fetches and fully *replaces* its message
+  list every 5 seconds (`Chat.startPolling()` / `stopPolling()`) — replacing rather than
+  appending is what makes a just-sent message immune to ever appearing twice once the next
+  poll confirms it from the server. Stops when the conversation closes or on logout. After
+  every successful fetch it calls `Conversations.markRead()` if the latest message id is new
+  since the last time it did so — that's what keeps an open conversation's unread count at 0
+  without a `POST /read` on every single tick.
+- **`conversations.js`** — polls `GET /conversations` every `CONVERSATION_POLL_INTERVAL`
+  (`config.js`, default 5000ms) to keep the sidebar's ordering, previews, and unread badges
+  current (`Conversations.startPolling()` / `stopPolling()`, started once from `init()`,
+  stopped on logout). Skips re-rendering when the response is unchanged, and never lets two
+  fetches overlap. If a poll ever finds unread messages on the conversation the user is
+  actively viewing (a brief race with `chat.js`'s own timer), it clears that badge immediately
+  and fires the read confirmation itself rather than flashing it.
+
+Both are written as plain functions (`handleNewMessage`-shaped: fetch, then hand the result to
+a render/update function) rather than anything poll-specific, so `startPolling()`/
+`stopPolling()` in each file are the intended seam for a future WebSocket connection to plug
+into — replacing the timer, not the handlers.
 
 ## Sidebar edge case: conversations with no messages
 

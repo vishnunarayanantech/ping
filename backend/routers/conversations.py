@@ -13,10 +13,16 @@ from schemas import (
     ConversationSummary,
     CreateConversationResponse,
     LastMessagePreview,
+    MarkReadResponse,
     UserOut,
 )
 from security import get_current_user
-from services.conversation_service import get_or_create_direct_conversation, get_user_conversations
+from services.conversation_service import (
+    get_or_create_direct_conversation,
+    get_user_conversations,
+    is_conversation_member,
+    mark_conversation_read,
+)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -51,7 +57,9 @@ def list_conversations(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    conversations, latest_by_conversation, other_user_by_conversation = get_user_conversations(db, current_user.id)
+    conversations, latest_by_conversation, other_user_by_conversation, unread_counts = get_user_conversations(
+        db, current_user.id
+    )
 
     summaries = []
     for conversation in conversations:
@@ -79,7 +87,25 @@ def list_conversations(
                 updated_at=conversation.updated_at,
                 other_user=UserOut.model_validate(other_user),
                 last_message=last_message_out,
+                unread_count=unread_counts.get(conversation.id, 0),
             )
         )
 
     return ConversationListResponse(success=True, conversations=summaries)
+
+
+@router.post("/{conversation_id}/read", response_model=MarkReadResponse)
+def mark_read(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not is_conversation_member(db, conversation_id, current_user.id):
+        # Same error for "doesn't exist" and "exists but you're not a
+        # member" as the rest of the API (see services/conversation_service.py
+        # / routers/messages.py) — never let a client learn which is true.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have access to this conversation")
+
+    mark_conversation_read(db, conversation_id, current_user.id)
+
+    return MarkReadResponse(success=True, message="Conversation marked as read")

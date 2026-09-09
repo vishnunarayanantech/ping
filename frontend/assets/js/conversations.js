@@ -1,8 +1,16 @@
 /**
  * Recent-conversations sidebar: load + render the list, keep track of which
- * one is active, and get-or-create a conversation when a search result is
- * clicked. Self-contained — owns the conversation-list DOM. dashboard.js
- * calls init() once with a callback for "a conversation should open now."
+ * one is active, get-or-create a conversation when a search result is
+ * clicked, and poll the backend so unread counts / ordering / previews stay
+ * current without a full page reload. Self-contained — owns the
+ * conversation-list DOM. dashboard.js calls init() once with a callback for
+ * "a conversation should open now."
+ *
+ * No WebSockets yet: polling is the only way this module learns about
+ * activity from other users. markRead()/refresh() are written as small,
+ * named operations independent of *how* they get triggered (a poll tick
+ * today, a WebSocket event later) so that swap only ever touches
+ * startPolling()/stopPolling() here.
  */
 const Conversations = (function ($) {
   'use strict';
@@ -11,7 +19,9 @@ const Conversations = (function ($) {
     currentUser: null,
     conversations: [],
     activeConversationId: null,
-    onOpenConversation: null
+    onOpenConversation: null,
+    pollHandle: null,
+    pollInFlight: false
   };
 
   let $list;
@@ -21,32 +31,87 @@ const Conversations = (function ($) {
     state.onOpenConversation = onOpenConversation;
     $list = $('#conversationList');
     load();
+    startPolling();
   }
 
   function load() {
     renderSkeleton();
-
-    Api.request({ url: '/conversations' })
-      .done(function (response) {
-        state.conversations = response.conversations;
-        render();
-      })
-      .fail(function (xhr) {
-        if (xhr.status === 401) return; // api.js is already redirecting to login
-        renderError(Ping.getErrorMessage(xhr, 'Unable to load conversations.'));
-      });
+    fetchConversations(true);
   }
 
   /** Re-fetch and re-render — called after sending a message so the sidebar
-   * reflects the new order/preview without a full page reload. */
+   * reflects the new order/preview without waiting for the next poll tick. */
   function refresh() {
-    Api.request({ url: '/conversations' })
+    fetchConversations(false);
+  }
+
+  function fetchConversations(isInitialLoad) {
+    if (state.pollInFlight) return; // never let requests overlap
+    state.pollInFlight = true;
+
+    return Api.request({ url: '/conversations' })
       .done(function (response) {
-        state.conversations = response.conversations;
-        render();
+        applyConversations(response.conversations);
       })
-      .fail(function () {
-        // Silent — a failed background refresh shouldn't disrupt an open chat.
+      .fail(function (xhr) {
+        if (xhr.status === 401) return; // api.js is already redirecting to login
+        if (isInitialLoad) {
+          renderError(Ping.getErrorMessage(xhr, 'Unable to load conversations.'));
+        }
+        // Silent on background poll failures — keep showing the last known
+        // state rather than disrupting whatever the user is doing.
+      })
+      .always(function () {
+        state.pollInFlight = false;
+      });
+  }
+
+  /**
+   * Apply a fresh /conversations response. Skips re-rendering entirely when
+   * nothing changed, so a poll tick with no news doesn't touch the DOM.
+   */
+  function applyConversations(freshConversations) {
+    // RULE 1 safety net: the conversation the user is actively looking at
+    // should never show as unread. chat.js is what actually marks it read
+    // (as soon as it notices a new message in the open conversation), but
+    // that runs on its own poll timer — if this sidebar poll ever samples
+    // the backend in the brief window before chat.js catches up, clear it
+    // here too instead of flashing a badge on the conversation they're
+    // already viewing.
+    freshConversations.forEach(function (conversation) {
+      if (conversation.id === state.activeConversationId && conversation.unread_count > 0) {
+        conversation.unread_count = 0;
+        sendMarkRead(conversation.id);
+      }
+    });
+
+    const changed = JSON.stringify(freshConversations) !== JSON.stringify(state.conversations);
+    state.conversations = freshConversations;
+    if (changed) render();
+  }
+
+  /** Fire-and-forget mark-as-read — used for the RULE 1 safety net above,
+   * where the backend just needs to catch up eventually. */
+  function sendMarkRead(conversationId) {
+    Api.request({ url: '/conversations/' + conversationId + '/read', method: 'POST' });
+  }
+
+  /**
+   * Mark a conversation read and only clear its badge once the backend
+   * confirms it (RULE 3 — a click alone must never clear the unread
+   * indicator; only an actually-successful read does). Called by chat.js
+   * once it has successfully loaded messages for the open conversation.
+   */
+  function markRead(conversationId) {
+    return Api.request({ url: '/conversations/' + conversationId + '/read', method: 'POST' })
+      .done(function () {
+        const conversation = state.conversations.find(function (c) {
+          return c.id === conversationId;
+        });
+        if (conversation && conversation.unread_count !== 0) {
+          conversation.unread_count = 0;
+          render();
+        }
       });
   }
 
@@ -54,10 +119,7 @@ const Conversations = (function ($) {
   function openWithUser(user) {
     Api.request({ url: '/conversations/direct/' + user.id, method: 'POST' })
       .done(function (response) {
-        setActive(response.conversation.id);
-        if (state.onOpenConversation) {
-          state.onOpenConversation(response.conversation.id, user);
-        }
+        openConversation(response.conversation.id, user);
       })
       .fail(function (xhr) {
         if (xhr.status === 401) return;
@@ -65,6 +127,15 @@ const Conversations = (function ($) {
       });
   }
 
+  function openConversation(conversationId, otherUser) {
+    setActive(conversationId);
+    if (state.onOpenConversation) {
+      state.onOpenConversation(conversationId, otherUser);
+    }
+  }
+
+  /** Just the "which sidebar item looks selected" state — independent of
+   * unread status, which only chat.js's confirmed markRead() clears. */
   function setActive(conversationId) {
     state.activeConversationId = conversationId;
     $list.find('.conversation-item').each(function () {
@@ -91,6 +162,10 @@ const Conversations = (function ($) {
     $('<div>', { class: 'conversation-list__empty' }).text(message).appendTo($list);
   }
 
+  function formatUnreadCount(count) {
+    return count > 99 ? '99+' : String(count);
+  }
+
   function render() {
     $list.empty();
 
@@ -104,9 +179,11 @@ const Conversations = (function ($) {
 
     state.conversations.forEach(function (conversation) {
       const otherUser = conversation.other_user;
+      const isUnread = conversation.unread_count > 0;
+
       const $item = $('<button>', {
         type: 'button',
-        class: 'conversation-item',
+        class: 'conversation-item' + (isUnread ? ' conversation-item--unread' : ''),
         'data-conversation-id': conversation.id
       });
 
@@ -115,9 +192,16 @@ const Conversations = (function ($) {
       const $info = $('<span>', { class: 'conversation-item__info' });
       const $top = $('<span>', { class: 'conversation-item__top' });
       $('<span>', { class: 'conversation-item__name' }).text(otherUser.name).appendTo($top);
+
+      const $meta = $('<span>', { class: 'conversation-item__meta' });
       $('<span>', { class: 'conversation-item__time' })
         .text(conversation.last_message ? formatRelativeTime(conversation.last_message.created_at) : '')
-        .appendTo($top);
+        .appendTo($meta);
+      if (isUnread) {
+        $('<span>', { class: 'unread-badge' }).text(formatUnreadCount(conversation.unread_count)).appendTo($meta);
+      }
+      $meta.appendTo($top);
+
       $top.appendTo($info);
 
       $('<span>', { class: 'conversation-item__preview' })
@@ -129,10 +213,7 @@ const Conversations = (function ($) {
       $item.toggleClass('is-active', conversation.id === state.activeConversationId);
 
       $item.on('click', function () {
-        setActive(conversation.id);
-        if (state.onOpenConversation) {
-          state.onOpenConversation(conversation.id, otherUser);
-        }
+        openConversation(conversation.id, otherUser);
       });
 
       $list.append($item);
@@ -164,10 +245,26 @@ const Conversations = (function ($) {
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
+  function startPolling() {
+    stopPolling();
+    state.pollHandle = setInterval(function () {
+      fetchConversations(false);
+    }, CONVERSATION_POLL_INTERVAL);
+  }
+
+  function stopPolling() {
+    if (state.pollHandle) {
+      clearInterval(state.pollHandle);
+      state.pollHandle = null;
+    }
+  }
+
   return {
     init: init,
     refresh: refresh,
     openWithUser: openWithUser,
-    setActive: setActive
+    setActive: setActive,
+    markRead: markRead,
+    stopPolling: stopPolling
   };
 })(jQuery);

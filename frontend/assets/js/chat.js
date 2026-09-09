@@ -20,6 +20,7 @@ const Chat = (function ($) {
     conversationId: null,
     otherUser: null,
     messages: [],
+    lastMarkedMessageId: null,
     pollHandle: null
   };
 
@@ -56,6 +57,7 @@ const Chat = (function ($) {
     state.conversationId = conversationId;
     state.otherUser = otherUser;
     state.messages = [];
+    state.lastMarkedMessageId = null;
 
     $shell.addClass('app-shell--conversation-open');
     $empty.prop('hidden', true);
@@ -77,6 +79,7 @@ const Chat = (function ($) {
     stopPolling();
     state.conversationId = null;
     state.otherUser = null;
+    state.lastMarkedMessageId = null;
     $shell.removeClass('app-shell--conversation-open');
     $conversation.prop('hidden', true);
     $empty.prop('hidden', false);
@@ -84,15 +87,19 @@ const Chat = (function ($) {
 
   function fetchAndRender(showLoading) {
     if (!state.conversationId) return;
+    const conversationId = state.conversationId;
 
     if (showLoading) {
       renderLoading();
     }
 
-    return Api.request({ url: '/messages/conversation/' + state.conversationId })
+    return Api.request({ url: '/messages/conversation/' + conversationId })
       .done(function (response) {
+        if (state.conversationId !== conversationId) return; // user switched away while this was in flight
+        const stayAtBottom = showLoading || isNearBottom();
         state.messages = response.messages;
-        renderMessages();
+        renderMessages(stayAtBottom);
+        markReadIfNeeded(conversationId);
       })
       .fail(function (xhr) {
         if (xhr.status === 401) return; // api.js is already redirecting to login
@@ -101,6 +108,32 @@ const Chat = (function ($) {
         }
         // Silent on poll failures — a blip shouldn't disrupt an open conversation.
       });
+  }
+
+  /**
+   * RULE 1 / RULE 3: mark the conversation read once messages are actually
+   * loaded — never just because it was clicked open. Skips the request
+   * entirely if nothing new has arrived since the last time this exact
+   * conversation was marked read (e.g. an empty conversation, or a poll
+   * tick with no new messages), so an open chat doesn't POST every 5s.
+   */
+  function markReadIfNeeded(conversationId) {
+    const latest = state.messages.length ? state.messages[state.messages.length - 1] : null;
+    const latestId = latest ? latest.id : null;
+    if (latestId === state.lastMarkedMessageId) return;
+
+    state.lastMarkedMessageId = latestId;
+    Conversations.markRead(conversationId);
+  }
+
+  /** Was the user already scrolled near the bottom before this render? Used
+   * so a poll tick never yanks someone back down while they're reading
+   * older messages further up. */
+  function isNearBottom() {
+    if (!$messages.length) return true;
+    const el = $messages[0];
+    const BOTTOM_THRESHOLD_PX = 80;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_THRESHOLD_PX;
   }
 
   function send() {
@@ -116,7 +149,8 @@ const Chat = (function ($) {
     })
       .done(function (response) {
         state.messages.push(response.message);
-        renderMessages();
+        state.lastMarkedMessageId = response.message.id; // our own message never needs marking read
+        renderMessages(true);
         $input.val('');
         Conversations.refresh();
       })
@@ -140,7 +174,7 @@ const Chat = (function ($) {
     $('<div>', { class: 'chat-status chat-status--error' }).text(message).appendTo($messages);
   }
 
-  function renderMessages() {
+  function renderMessages(scrollToBottomAfter) {
     $messages.empty();
 
     if (state.messages.length === 0) {
@@ -161,7 +195,9 @@ const Chat = (function ($) {
       $messages.append($bubble);
     });
 
-    scrollToBottom();
+    if (scrollToBottomAfter) {
+      scrollToBottom();
+    }
   }
 
   function scrollToBottom() {

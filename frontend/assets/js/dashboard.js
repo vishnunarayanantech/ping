@@ -36,6 +36,7 @@ $(function () {
 
   $('#logoutBtn').on('click', function () {
     Chat.stopPolling();
+    Conversations.stopPolling();
     Ping.clearSession();
     window.location.href = '../auth/login.html';
   });

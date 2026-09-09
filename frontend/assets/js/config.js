@@ -12,3 +12,7 @@ const APP_CONFIG = {
 };
 
 const API_BASE_URL = 'http://127.0.0.1:8000/api/v1';
+
+// How often the sidebar re-fetches /conversations to catch new messages
+// (unread counts, ordering, previews) while no WebSocket connection exists.
+const CONVERSATION_POLL_INTERVAL = 5000;

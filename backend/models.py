@@ -43,6 +43,10 @@ class ConversationMember(Base):
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
+    # NULL means "never read this conversation" — every message in it is
+    # unread. Set to the conversation's latest message timestamp (not
+    # just "now") when the member reads it; see mark_conversation_read().
+    last_read_at = Column(DateTime(timezone=True), nullable=True)
 
     conversation = relationship("Conversation", back_populates="members")
     user = relationship("User")

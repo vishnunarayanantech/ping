@@ -1,0 +1,20 @@
+1. Backend (FastAPI + SQLite, port 8000)
+
+
+cd /var/www/html/ping/backend
+source venv/bin/activate
+uvicorn main:app --reload
+API at http://127.0.0.1:8000, docs at http://127.0.0.1:8000/docs.
+
+2. Frontend (static files, must be served over HTTP — not file://, since backend CORS rejects Origin: null)
+
+
+cd /var/www/html/ping/frontend
+python3 -m http.server 5500
+Then open http://127.0.0.1:5500 in a browser.
+
+Notes:
+
+backend/ping.db already exists from a previous run — no need to recreate it, and per your standing preference I won't wipe it for convenience.
+If you serve the frontend on a different port, add that origin to DEV_ORIGINS in backend/main.py.
+No .env is present yet (only .env.example) — fine for solo local use since SECRET_KEY falls back to a dev default, but not for anything shared.

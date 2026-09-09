@@ -116,6 +116,7 @@ class ConversationSummary(BaseModel):
     updated_at: datetime
     other_user: UserOut
     last_message: Optional[LastMessagePreview] = None
+    unread_count: int = 0
 
     @field_validator("updated_at")
     @classmethod
@@ -126,3 +127,8 @@ class ConversationSummary(BaseModel):
 class ConversationListResponse(BaseModel):
     success: bool
     conversations: List[ConversationSummary]
+
+
+class MarkReadResponse(BaseModel):
+    success: bool
+    message: str

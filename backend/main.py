@@ -7,6 +7,8 @@ Wires together the database, routers, CORS, and consistent {success,
 message} error responses (so the frontend never has to special-case
 FastAPI's default error shapes).
 """
+from sqlalchemy import inspect, text
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +25,26 @@ from routers import auth, conversations, messages, users
 # already exists) — see README's "Schema changes" note for what that means
 # when a model's columns change, as Message's just did.
 Base.metadata.create_all(bind=engine)
+
+
+def _add_missing_columns():
+    """
+    create_all() can't add a column to a table that already exists (see
+    above), which is exactly what happened when unread-tracking added
+    `conversation_members.last_read_at` to a table that predates it. Rather
+    than delete ping.db (fine when there was no real data at stake, per
+    README "Schema history" — not true here), do the one-column ALTER TABLE
+    by hand. Idempotent: a no-op once the column exists, so it's always safe
+    to run on startup, on any database whether it's old or brand new.
+    """
+    inspector = inspect(engine)
+    existing_columns = {col["name"] for col in inspector.get_columns("conversation_members")}
+    if "last_read_at" not in existing_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE conversation_members ADD COLUMN last_read_at TIMESTAMP"))
+
+
+_add_missing_columns()
 
 app = FastAPI(title="PING API", version="0.3.0")
 

@@ -994,6 +994,14 @@ p {
   background: var(--color-primary-light);
 }
 
+/* Unread: subtle highlight + left accent, not the same visual as .is-active
+   so a selected-but-read conversation and an unread-but-inactive one never
+   look identical. */
+.conversation-item--unread {
+  background: var(--color-primary-light);
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
 .conversation-item__info {
   display: flex;
   flex-direction: column;
@@ -1017,6 +1025,17 @@ p {
   white-space: nowrap;
 }
 
+.conversation-item--unread .conversation-item__name {
+  font-weight: 700;
+}
+
+.conversation-item__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .conversation-item__time {
   flex-shrink: 0;
   font-size: 0.6875rem;
@@ -1029,6 +1048,28 @@ p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-item--unread .conversation-item__preview {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 /* Loading skeleton */
