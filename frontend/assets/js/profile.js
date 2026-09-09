@@ -1,9 +1,19 @@
 /**
- * Profile page behavior: user-menu dropdown, and toggling the profile
- * card between view mode and edit mode. Nothing here persists — a
+ * Profile page behavior: auth guard, populating real session data,
+ * the user-menu dropdown, logout, and toggling the profile card
+ * between view mode and edit mode. Job title / department / employee ID
+ * are placeholder fields (no backend support yet) — only name, email and
+ * initials come from the real session. Nothing here persists — a
  * cancel restores the last-saved in-memory values.
  */
 $(function () {
+  if (!Ping.isAuthenticated()) {
+    window.location.href = '../auth/login.html';
+    return;
+  }
+
+  const user = Ping.getSession();
+
   const $userMenu = $('#userMenu');
   const $editBtn = $('#editBtn');
   const $saveBtn = $('#saveBtn');
@@ -11,6 +21,11 @@ $(function () {
   const $viewActions = $('#viewActions');
   const $editActions = $('#editActions');
   const $editableInputs = $('#fullName, #jobTitle, #department');
+
+  // Seed the real, session-backed fields (name, email, initials). Job
+  // title / department stay whatever placeholder text is in the markup.
+  $('#fullName').val(user.name);
+  $('#displayEmail').text(user.email);
 
   // Snapshot of last-saved values, used to restore the form on cancel.
   let savedValues = {
@@ -105,6 +120,12 @@ $(function () {
       $userMenu.removeClass('is-open');
       $('#userMenuTrigger').attr('aria-expanded', 'false');
     }
+  });
+
+  $('#logoutLink').on('click', function (e) {
+    e.preventDefault();
+    Ping.clearSession();
+    window.location.href = '../auth/login.html';
   });
 
   refreshDisplay();

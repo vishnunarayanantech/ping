@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, computed_field, field_validator
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -11,6 +11,38 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+# MIME types that are technically "image/*" but capable of carrying active
+# content (SVG can embed <script>) — excluded from inline preview out of an
+# abundance of caution even though <img> already disables SVG scripting;
+# there's no functional need to preview them inline, so there's no reason to
+# take the risk. Category, not access — these still download like any file.
+_UNSAFE_INLINE_IMAGE_MIME_TYPES = {"image/svg+xml"}
+
+
+def _categorize_mime_type(mime_type: str) -> str:
+    """
+    Maps a message file's SERVER-DERIVED mime_type (see
+    services/file_service.py — never the client's claimed Content-Type) to
+    the coarse category the frontend uses to decide whether to render an
+    inline preview at all: "image" | "video" | "audio" | "other". Prefix-
+    based on purpose — the task calls for previewing "other safely
+    supported" formats too, not just a fixed list, and a mistaken/malicious
+    category is safe by construction anyway: <img>/<video>/<audio> never
+    execute their src's bytes as anything other than that media type, so a
+    wrongly-categorized file just fails to render (see MessageFileOut.category's
+    "gracefully fall back" contract) rather than doing anything unsafe.
+    """
+    if mime_type in _UNSAFE_INLINE_IMAGE_MIME_TYPES:
+        return "other"
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("video/"):
+        return "video"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    return "other"
 
 
 class UserRegister(BaseModel):
@@ -130,7 +162,7 @@ class MessageFileOut(BaseModel):
     """The file-share info a file message's UI needs — file_path and
     stored_filename deliberately excluded, since those are storage-layer
     details the client has no business seeing (and shouldn't need, since
-    downloading always goes through /messages/files/{id}/download)."""
+    downloading/viewing always goes through /messages/files/{id}/download)."""
 
     id: int
     original_filename: str
@@ -142,6 +174,17 @@ class MessageFileOut(BaseModel):
     @classmethod
     def _created_at_utc(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def category(self) -> str:
+        """"image" | "video" | "audio" | "other" — derived fresh from
+        mime_type on every serialization rather than stored, so it can never
+        drift out of sync with the field it's derived from. chat.js uses
+        this alone to decide whether to attempt an inline preview at all;
+        see _categorize_mime_type's docstring for why a wrong guess here is
+        safe, not just convenient."""
+        return _categorize_mime_type(self.mime_type)
 
     class Config:
         from_attributes = True

@@ -39,13 +39,13 @@
       </div>
 
       <div class="app-sidebar__footer">
-        <div class="sidebar-user">
+        <a class="sidebar-user" id="sidebarUserLink" href="../profile/profile.html" title="View profile">
           <span class="avatar avatar--sm" id="sidebarUserInitials"></span>
           <span class="sidebar-user__info">
             <span class="sidebar-user__name" id="sidebarUserName"></span>
             <span class="sidebar-user__email" id="sidebarUserEmail"></span>
           </span>
-        </div>
+        </a>
         <button type="button" class="icon-btn" id="logoutBtn" aria-label="Logout" title="Logout">
           <i data-lucide="log-out" aria-hidden="true"></i>
         </button>
@@ -143,6 +143,16 @@
     </div>
   </div>
 
+  <!-- Image lightbox: opened by clicking an inline image preview (see
+       chat.js / media.js). Just an enlarged view of the same already-
+       fetched image — never triggers a download. -->
+  <div class="lightbox-overlay" id="imageLightboxOverlay" hidden>
+    <button type="button" class="icon-btn lightbox__close" id="imageLightboxClose" aria-label="Close">
+      <i data-lucide="x" aria-hidden="true"></i>
+    </button>
+    <img class="lightbox__image" id="imageLightboxImg" alt="">
+  </div>
+
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
@@ -154,6 +164,7 @@
   <script src="../assets/js/conversations.js"></script>
   <script src="../assets/js/forward.js"></script>
   <script src="../assets/js/upload.js"></script>
+  <script src="../assets/js/media.js"></script>
   <script src="../assets/js/chat.js"></script>
   <script src="../assets/js/dashboard.js"></script>
 </body>

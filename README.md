@@ -79,7 +79,8 @@ PING/
 │       │   ├── conversations.js  Recent-chats sidebar: load, render, active state, get-or-create
 │       │   ├── chat.js      Open conversation: message rendering, send, polling, reply-to-message UI
 │       │   ├── upload.js    Composer's attach-file button: picker, progress bar, POST /messages/upload
-│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat + Upload together
+│       │   ├── media.js     Blob-URL cache + fetch for inline image/video/audio previews, image lightbox
+│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat + Upload + Media together
 │       └── images/logo.svg
 │
 ├── .gitignore
@@ -236,6 +237,19 @@ members live in `conversation_members`, not on the message itself. This replaced
   written (never trusting `Content-Length` or the client alone), and rejected outright by
   extension (`BLOCKED_UPLOAD_EXTENSIONS`) regardless of the client's claimed MIME type — the
   stored MIME type is always guessed server-side from the sanitized filename instead.
+- **Inline media previews**: `schemas.MessageFileOut.category` (`"image"` / `"video"` /
+  `"audio"` / `"other"`) is a Pydantic `@computed_field` derived fresh from `mime_type` on every
+  response, not a stored column — it can never drift out of sync with the field it's derived
+  from. `image/svg+xml` is deliberately excluded from `"image"` (falls back to `"other"`) even
+  though SVG can embed `<script>` — belt-and-suspenders alongside the browser's own refusal to
+  execute script from an SVG loaded via `<img>`, since there's no functional need to preview one
+  inline anyway. No new endpoint: the frontend's `media.js` fetches the SAME
+  `GET /messages/files/{id}/download` response used for downloads via authenticated `fetch()` +
+  `Blob` (a plain `<img src>`/`<video src>` can't carry the Authorization header the endpoint
+  requires), caches the resulting `blob:` URL by file id, and only falls back to the plain file
+  card if that fetch fails OR the browser's own `<img>`/`<video>`/`<audio>` `error` event fires
+  (bytes fetched fine but couldn't actually be decoded as that media type) — the latter is what
+  makes an unsupported/corrupt file degrade gracefully instead of showing a broken player.
 
 ### Schema history
 
@@ -271,6 +285,10 @@ needed, and old messages render exactly as before.
 
 File sharing needed neither trick either, same reasoning as reactions: `message_files` is a
 brand new table, so `create_all()` handles it on its own on top of an existing `ping.db`.
+
+Inline media previews needed no schema change at all, not even a new column: `category` is
+computed at response time from the existing `mime_type` field (see "Inline media previews"
+above), so it required zero migration and works retroactively on files uploaded before it shipped.
 
 ## Real-time strategy
 
@@ -338,3 +356,12 @@ the real deployed frontend origin — before shipping to production. Never set
   tree and is never mounted as a static directory — the only way to read a file back is
   `GET /messages/files/{id}/download`, which independently re-checks that the caller belongs
   to the file's conversation, same as every other message endpoint.
+- Inline media previews reuse that same download endpoint (see "Inline media previews" in
+  Data model above) rather than adding a second, less-guarded read path — there is no way to
+  view a file's bytes that skips the conversation-membership check. Preview eligibility
+  (`MessageFileOut.category`) is a rendering hint only, not a trust decision: a wrongly- or
+  maliciously-typed file is still safe to preview, because `<img>`/`<video>`/`<audio>` never
+  execute their `src`'s bytes as anything other than that media type — a mismatch just fails to
+  render (and is treated as such, falling back to the plain file card) rather than doing
+  anything unsafe. `image/svg+xml` is excluded from preview outright since SVG can embed
+  `<script>`, even though `<img>` already refuses to execute it.

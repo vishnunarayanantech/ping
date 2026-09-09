@@ -16,6 +16,11 @@
     </a>
 
     <div class="app-header__actions">
+      <a class="btn btn--ghost" href="../dashboard/index.html" id="backToChatsBtn">
+        <i data-lucide="arrow-left" aria-hidden="true"></i>
+        <span class="back-btn__label">Back to chats</span>
+      </a>
+
       <button type="button" class="icon-btn theme-toggle" aria-label="Toggle dark mode">
         <i data-lucide="sun" class="icon-sun" aria-hidden="true"></i>
         <i data-lucide="moon" class="icon-moon" aria-hidden="true"></i>
@@ -38,7 +43,7 @@
             Settings
           </a>
           <div class="dropdown-menu__divider"></div>
-          <a class="dropdown-menu__item dropdown-menu__item--danger" href="../auth/login.html" role="menuitem">
+          <a class="dropdown-menu__item dropdown-menu__item--danger" href="../auth/login.html" role="menuitem" id="logoutLink">
             <i data-lucide="log-out" aria-hidden="true"></i>
             Log out
           </a>
@@ -115,7 +120,7 @@
                   Read-only
                 </span>
               </span>
-              <span class="profile-field__value">john.doe@company.com</span>
+              <span class="profile-field__value" id="displayEmail">john.doe@company.com</span>
             </div>
 
             <div class="profile-field">

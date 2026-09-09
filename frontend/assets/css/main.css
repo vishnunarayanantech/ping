@@ -1131,6 +1131,15 @@ p {
   align-items: center;
   gap: var(--space-sm);
   min-width: 0;
+  flex: 1;
+  padding: 6px;
+  margin: -6px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.sidebar-user:hover {
+  background: var(--color-surface-alt);
 }
 
 .sidebar-user__info {
@@ -1702,6 +1711,86 @@ p {
   height: 15px;
 }
 
+/* Inline image/video/audio preview for a file-share message (see
+   buildFileOrMediaBlock/buildMediaPreviewElement in chat.js) — sits above
+   the same .message-file meta bar every file message gets, so name/size/
+   download stay available either way. Capped narrower than the bubble's
+   own max-width so a large image/video can't blow the bubble out to the
+   full 68% row width. */
+.message-media {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.message-media__preview {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--color-surface-alt);
+}
+
+.message-media__image {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: cover;
+  cursor: zoom-in;
+  transition: opacity var(--transition-fast);
+}
+
+.message-media__image:hover {
+  opacity: 0.9;
+}
+
+.message-media__video,
+.message-media__audio {
+  display: block;
+  width: 100%;
+}
+
+.message-media__video {
+  max-height: 280px;
+  background: #000;
+}
+
+.message-media__audio {
+  height: 40px;
+}
+
+/* Shown while Media.getPreview()'s blob fetch is in flight — see chat.js.
+   Fixed height so the layout doesn't jump much once the real preview (or,
+   on failure, the fallback file card alone) replaces it. */
+.message-media__preview--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  height: 140px;
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+}
+
+.message-bubble--sent .message-media__preview--loading {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.message-media__spinner {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.message-bubble--sent .message-media__spinner {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
 /* Reply-target preview shown above the composer while replying; mirrors
    .message-quote's visual language (colored bar + sender/content lines)
    but sits in its own bar since it's not inside a bubble. */
@@ -2033,6 +2122,43 @@ p {
 .forward-conversation-item.is-selected .forward-conversation-item__check {
   background: var(--color-primary);
   border-color: var(--color-primary);
+  color: #fff;
+}
+
+/* 11b. Image lightbox — opened by clicking a .message-media__image preview
+   (see chat.js / media.js). Just an enlarged view of the SAME already-
+   fetched blob URL, never a fresh download. */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+  background: rgba(13, 14, 20, 0.85);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.lightbox__image {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  object-fit: contain;
+}
+
+.lightbox__close {
+  position: fixed;
+  top: var(--space-lg);
+  right: var(--space-lg);
+  z-index: 960;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.lightbox__close:hover {
+  background: rgba(255, 255, 255, 0.22);
   color: #fff;
 }
 
@@ -2643,6 +2769,14 @@ p {
 
   .user-menu__name {
     display: none;
+  }
+
+  .back-btn__label {
+    display: none;
+  }
+
+  #backToChatsBtn {
+    padding: 0 var(--space-sm);
   }
 
   .auth-card {

@@ -421,7 +421,7 @@ const Chat = (function ($) {
       // services/file_service.py) — the file block below already conveys
       // that, so skip rendering .content as well. Uploads never set
       // reply_to either, so this is always either/or with that branch too.
-      $bubble.append(buildFileBlock(message.file));
+      $bubble.append(buildFileOrMediaBlock(message));
     } else {
       if (message.reply_to) {
         $bubble.append(buildQuoteBlock(message.reply_to));
@@ -522,11 +522,100 @@ const Chat = (function ($) {
     return $block;
   }
 
+  const PREVIEWABLE_CATEGORIES = ['image', 'video', 'audio'];
+
+  /**
+   * Dispatches a file-share message to an inline media preview
+   * (image/video/audio, per the server-derived `file.category` —
+   * schemas.MessageFileOut.category, never guessed client-side from the
+   * filename) or the plain file card, and handles graceful fallback: a
+   * category that isn't previewable, or one whose blob fetch has already
+   * failed (see Media.markError), renders the plain card exactly as if it
+   * were never previewable in the first place — no broken-preview UI ever
+   * shown, per the task's "gracefully fall back" requirement.
+   */
+  function buildFileOrMediaBlock(message) {
+    const file = message.file;
+    if (PREVIEWABLE_CATEGORIES.indexOf(file.category) === -1) {
+      return buildFileBlock(file);
+    }
+
+    const preview = Media.getPreview(file.id, function () {
+      rerenderRow(message.id); // fires once the fetch settles (ready or error)
+    });
+    if (preview.status === 'error') {
+      return buildFileBlock(file);
+    }
+
+    const $wrap = $('<div>', { class: 'message-media' });
+    $wrap.append(buildMediaPreviewElement(file, preview, message.id));
+    $wrap.append(buildFileBlock(file));
+    return $wrap;
+  }
+
+  function buildMediaPreviewElement(file, preview, messageId) {
+    if (preview.status === 'loading') {
+      const $placeholder = $('<div>', { class: 'message-media__preview message-media__preview--loading' });
+      $('<span>', { class: 'message-media__spinner', 'aria-hidden': 'true' }).appendTo($placeholder);
+      $('<span>').text('Loading preview…').appendTo($placeholder);
+      return $placeholder;
+    }
+
+    // preview.status === 'ready' from here — preview.url is a local blob:
+    // URL, so the element loads instantly with no further network request.
+    const $preview = $('<div>', { class: 'message-media__preview' });
+
+    if (file.category === 'image') {
+      const $img = $('<img>', {
+        class: 'message-media__image',
+        src: preview.url,
+        alt: file.original_filename
+      });
+      $img.on('click', function (e) {
+        e.stopPropagation();
+        Media.openLightbox(preview.url, file.original_filename);
+      });
+      $img.on('error', function () {
+        Media.markError(file.id);
+        rerenderRow(messageId);
+      });
+      $preview.append($img);
+    } else if (file.category === 'video') {
+      // preload:'metadata' (not 'auto') since preview.url is already a
+      // fully-fetched local blob — nothing left to eagerly buffer.
+      const $video = $('<video>', { class: 'message-media__video', src: preview.url, preload: 'metadata' })
+        .prop('controls', true); // .prop, not the attrs object above — controls/autoplay/muted are IDL boolean properties, not string attributes
+      $video.on('click', function (e) {
+        e.stopPropagation(); // don't let a control click bubble into the row's reply/react handlers
+      });
+      $video.on('error', function () {
+        Media.markError(file.id);
+        rerenderRow(messageId);
+      });
+      $preview.append($video);
+    } else {
+      const $audio = $('<audio>', { class: 'message-media__audio', src: preview.url, preload: 'metadata' })
+        .prop('controls', true);
+      $audio.on('click', function (e) {
+        e.stopPropagation();
+      });
+      $audio.on('error', function () {
+        Media.markError(file.id);
+        rerenderRow(messageId);
+      });
+      $preview.append($audio);
+    }
+
+    return $preview;
+  }
+
   /** File-share block shown inside a file message's own bubble (see the
    * message.file branch in renderMessageRow): icon (by MIME type), name,
    * size, and a download button that fetches the file as a Blob (rather
    * than a plain <a href>) so the request can carry the Authorization
-   * header the download endpoint requires. */
+   * header the download endpoint requires. Also what a previewable
+   * image/video/audio message renders BELOW its inline preview (see
+   * buildFileOrMediaBlock) — same metadata + download either way. */
   function buildFileBlock(file) {
     const $block = $('<div>', { class: 'message-file' });
 
@@ -584,17 +673,15 @@ const Chat = (function ($) {
    * Downloads a file via an authenticated fetch (a plain <a href> can't
    * carry the Authorization header the endpoint requires) and hands the
    * browser the result as a Blob so it saves under the original filename
-   * instead of navigating to it.
+   * instead of navigating to it. Goes through Media.fetchAsBlob — the same
+   * helper inline previews use — rather than duplicating the fetch, though
+   * this always issues its own request rather than reading Media's cache:
+   * a cached preview blob URL is fine to *display*, but re-fetching keeps
+   * download decoupled from preview-cache bookkeeping (a file with no
+   * inline preview, e.g. a PDF, still downloads with zero cache involved).
    */
   function downloadFile(fileId, filename) {
-    const token = Ping.getToken();
-    fetch(API_BASE_URL + '/messages/files/' + fileId + '/download', {
-      headers: token ? { Authorization: 'Bearer ' + token } : {}
-    })
-      .then(function (res) {
-        if (!res.ok) throw new Error('Download failed');
-        return res.blob();
-      })
+    Media.fetchAsBlob(fileId)
       .then(function (blob) {
         const url = URL.createObjectURL(blob);
         const $link = $('<a>', { href: url, download: filename }).css('display', 'none');
