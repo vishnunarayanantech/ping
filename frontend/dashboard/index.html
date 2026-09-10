@@ -25,6 +25,11 @@
       <span class="active-call-bar__name" id="activeCallBarName"></span>
       <span class="active-call-bar__status" id="activeCallBarStatus"></span>
     </span>
+    <!-- Audio calls only (see calls.js's renderActiveBar/renderScreenShareButton)
+         — shown while this side is sharing its screen, as an explicit "you
+         are sharing" cue that doesn't depend on noticing the tiny local
+         preview thumbnail in #callVideoPanel. -->
+    <span class="active-call-bar__sharing-badge" id="activeCallSharingBadge" hidden>Sharing your screen</span>
     <button type="button" class="icon-btn active-call-bar__mute" id="activeCallMuteBtn" aria-label="Mute microphone" title="Mute">
       <i data-lucide="mic" aria-hidden="true"></i>
     </button>
@@ -32,6 +37,14 @@
          for an audio call so that call's bar is pixel-identical to before. -->
     <button type="button" class="icon-btn active-call-bar__camera" id="activeCallCameraBtn" aria-label="Turn off camera" title="Turn off camera" hidden>
       <i data-lucide="video" aria-hidden="true"></i>
+    </button>
+    <!-- Audio calls only (see calls.js's renderScreenShareButton) — the
+         camera button above is video-call-only and this one is
+         audio-call-only, so exactly one of the two ever shows at a time.
+         Feature C is audio+screen only (no camera track involved) — see
+         calls.js's toggleScreenShare. -->
+    <button type="button" class="icon-btn active-call-bar__screen-share" id="activeCallScreenShareBtn" aria-label="Share your screen" title="Share Screen" hidden>
+      <i data-lucide="screen-share" aria-hidden="true"></i>
     </button>
     <button type="button" class="call-btn call-btn--end active-call-bar__end" id="activeCallEndBtn" aria-label="End call" title="End call">
       <i data-lucide="phone-off" aria-hidden="true"></i>
@@ -53,7 +66,7 @@
         <span class="avatar avatar--lg" id="callVideoPanelAvatar"></span>
       </div>
     </div>
-    <div class="call-video-panel__local-wrap">
+    <div class="call-video-panel__local-wrap" id="callLocalWrap">
       <video class="call-video-panel__local" id="callLocalVideo" autoplay muted playsinline></video>
       <div class="call-video-panel__placeholder call-video-panel__placeholder--local" id="callLocalPlaceholder" hidden>
         <i data-lucide="video-off" aria-hidden="true"></i>

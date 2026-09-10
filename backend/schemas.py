@@ -469,13 +469,19 @@ class CallActiveResponse(BaseModel):
 # The only WebRTC/call-UI signaling message shapes this feature ever relays —
 # restricting the backend to this set is the same "don't let a direct API
 # call smuggle arbitrary content through" reasoning as
-# schemas.ALLOWED_REACTION_EMOJIS. "camera-state" is the one non-WebRTC
-# entry: disabling a local video track (see calls.js's toggleCamera) doesn't
-# reliably surface as the browser's native track-muted event on the OTHER
-# side (some engines just send black frames instead of actually pausing the
-# RTP stream), so the camera ON/OFF indicator needs its own explicit,
-# trivial message over this SAME relay rather than a new channel.
-CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state"}
+# schemas.ALLOWED_REACTION_EMOJIS. "camera-state" and "screen-share-state" are
+# the two non-WebRTC entries: disabling a local video track (see calls.js's
+# toggleCamera) or stopping a screen-share track (see calls.js's
+# stopScreenShare) doesn't reliably surface as the browser's native
+# track-muted event on the OTHER side (some engines just send black frames
+# instead of actually pausing the RTP stream), so each needs its own
+# explicit, trivial message over this SAME relay rather than a new channel.
+# "offer"/"answer" already cover renegotiation too (e.g. adding the
+# screen-share video track to an established audio call) — calls.js tells
+# the two apart by whether the peer connection already has a remote
+# description, not by a distinct signal type, so no new type was needed for
+# that part.
+CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state", "screen-share-state"}
 
 
 class CallSignalCreate(BaseModel):

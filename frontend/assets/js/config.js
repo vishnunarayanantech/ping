@@ -44,3 +44,11 @@ const CALL_CONNECT_TIMEOUT_MS = 20000;
 // Used only if GET /calls/ice-servers can't be reached — backend/config.py's
 // ICE_STUN_URLS/TURN_* env vars are the real source of truth.
 const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+// Screen sharing (see calls.js) renegotiates the existing peer connection
+// rather than opening a new one — this bounds how long that one extra
+// offer/answer round trip is allowed to take before it's treated as failed
+// (independent of CALL_CONNECT_TIMEOUT_MS, which only covers the original
+// call setup) so a lost renegotiation signal can't leave the "Share Screen"
+// button stuck disabled forever.
+const CALL_RENEGOTIATION_TIMEOUT_MS = 15000;

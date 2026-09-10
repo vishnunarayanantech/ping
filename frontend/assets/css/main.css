@@ -2373,6 +2373,33 @@ p {
   cursor: not-allowed;
 }
 
+/* 11e. Screen sharing (audio calls only — see calls.js's toggleScreenShare).
+   .is-active here means "currently sharing" (unlike mute/camera above,
+   where it means "currently off") — highlighted the same way so a user
+   mid-share gets a clear, persistent reminder they're broadcasting their
+   screen, same as most video-calling apps color their "Stop Sharing"
+   control differently from its resting state. */
+.active-call-bar__screen-share.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.active-call-bar__screen-share:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.active-call-bar__sharing-badge {
+  flex-shrink: 0;
+  padding: 0.25em 0.65em;
+  border-radius: var(--radius-full);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* 11d. Video calling — local camera preview inside the outgoing/incoming
    call-panel, plus the floating connecting/connected video panel. Extends
    11c above; nothing here is reachable for an audio call (state.callType
@@ -2472,6 +2499,29 @@ p {
   height: 22px;
 }
 
+/* Screen sharing (audio calls — see calls.js's renderVideoPanel). Same panel
+   as video calling above, sized up and letterboxed instead of cropped since
+   legibility of shared screen content matters far more than it does for a
+   face — cropping a shared document/slide the way a camera feed is cropped
+   (object-fit: cover) would cut off exactly the part someone's trying to
+   show. The local PIP drops its self-facing mirror for the same reason a
+   screen (unlike a face) was never mirrored to begin with; it's hidden
+   outright by calls.js (see callLocalWrap) whenever THIS side isn't the one
+   sharing, rather than showing an empty/placeholder box with nothing to say. */
+.call-video-panel--screen-share {
+  width: min(640px, calc(100vw - 2 * var(--space-lg)));
+  aspect-ratio: 16 / 9;
+}
+
+.call-video-panel--screen-share .call-video-panel__remote {
+  object-fit: contain;
+  background: #000;
+}
+
+.call-video-panel--screen-share .call-video-panel__local {
+  transform: none;
+}
+
 @media (max-width: 640px) {
   .call-video-panel {
     width: 168px;
@@ -2483,6 +2533,10 @@ p {
   .call-video-panel__local-wrap {
     width: 56px;
     height: 56px;
+  }
+
+  .call-video-panel--screen-share {
+    width: min(320px, calc(100vw - 2 * var(--space-sm) * 2));
   }
 }
 

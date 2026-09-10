@@ -33,6 +33,25 @@
  * The actual microphone/camera/audio streaming NEVER goes through this API —
  * that's the whole point of WebRTC here (see RTCPeerConnection below): the
  * backend only ever relays small JSON blobs it never looks inside.
+ *
+ * Screen sharing (feature C) is an extension of an AUDIO call specifically —
+ * getDisplayMedia() output added as a second local track on the SAME
+ * RTCPeerConnection an audio call already has, never a second connection or
+ * a second call. Since an audio call's peer connection starts with no video
+ * m-line at all, turning screen share on for the first time in a given call
+ * needs one manual renegotiation (see renegotiate/handleRenegotiationOffer)
+ * over this SAME offer/answer signaling — after that, the transceiver/sender
+ * it created is kept and reused for the rest of the call (see
+ * startScreenShare/stopScreenShare's replaceTrack/addTrack split), so
+ * toggling sharing off and back on again never renegotiates twice. Because
+ * either side can click Share Screen, unlike the initial call setup where
+ * only the caller ever offers, handleSignal's offer/answer branches tell a
+ * renegotiation apart from the original handshake by whether the connection
+ * already has a remote description (see handleSignal's own 'offer' branch)
+ * — and a minimal same-shape-as-camera-state 'screen-share-state' signal (not
+ * track.muted, unreliable for the same reason camera-state already isn't —
+ * see schemas.CALL_SIGNAL_TYPES) tells the other side sharing started/
+ * stopped without needing another renegotiation for every toggle.
  */
 const Calls = (function ($) {
   'use strict';
@@ -81,6 +100,29 @@ const Calls = (function ($) {
     // is assumed on until they say otherwise, matching that video calls
     // start with the camera on (task requirement).
     remoteCameraOn: true,
+    // Screen sharing (audio calls only — see toggleScreenShare). Mirrors the
+    // cameraOn/remoteCameraOn split above: *ScreenSharing tracks the OTHER
+    // side (driven by the 'screen-share-state' signal, not track.muted —
+    // same reasoning as remoteCameraOn), screenShareActive is this side's
+    // own toggle state. screenSender is kept for the LIFE OF THE CALL once
+    // created so later toggles reuse it via replaceTrack() instead of ever
+    // calling pc.addTrack() a second time — see startScreenShare.
+    screenShareActive: false,
+    screenStream: null,
+    screenTrack: null,
+    screenSender: null,
+    remoteScreenSharing: false,
+    remoteScreenTrack: null,
+    // True from the moment this side either starts sending its own
+    // renegotiation offer or starts answering one just received, until that
+    // exchange resolves — see renegotiate/handleRenegotiationOffer. Doubles
+    // as the offer-collision guard (glare: both sides click Share Screen at
+    // once) and as the "Share Screen" button's disabled state so a second
+    // click mid-renegotiation can never create a second sender/offer.
+    negotiating: false,
+    pendingRenegotiationResolve: null,
+    pendingRenegotiationReject: null,
+    renegotiationTimeout: null,
     lastSignalId: 0,
     pendingOffer: null,
     pendingCandidates: [],
@@ -108,8 +150,11 @@ const Calls = (function ($) {
   let $overlay, $avatar, $previewVideo, $name, $typeLabel, $statusText, $actionsOutgoing, $actionsIncoming;
   // #activeCallBar: the compact, non-blocking bar — connecting/connected only.
   let $appShell, $activeBar, $activeBarAvatar, $activeBarName, $activeBarStatus, $muteBtn, $cameraBtn, $remoteAudio;
-  // #callVideoPanel: video calls only, connecting/connected only — see renderVideoPanel.
-  let $videoPanel, $videoPanelAvatar, $remoteVideo, $remotePlaceholder, $localVideo, $localPlaceholder;
+  // Audio calls only — see renderScreenShareButton/renderActiveBar.
+  let $screenShareBtn, $sharingBadge;
+  // #callVideoPanel: video calls (camera) OR audio calls currently sharing a
+  // screen, connecting/connected only — see renderVideoPanel.
+  let $videoPanel, $videoPanelAvatar, $remoteVideo, $remotePlaceholder, $localWrap, $localVideo, $localPlaceholder;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -131,11 +176,14 @@ const Calls = (function ($) {
     $muteBtn = $('#activeCallMuteBtn');
     $cameraBtn = $('#activeCallCameraBtn');
     $remoteAudio = $('#callRemoteAudio');
+    $screenShareBtn = $('#activeCallScreenShareBtn');
+    $sharingBadge = $('#activeCallSharingBadge');
 
     $videoPanel = $('#callVideoPanel');
     $videoPanelAvatar = $('#callVideoPanelAvatar');
     $remoteVideo = $('#callRemoteVideo');
     $remotePlaceholder = $('#callRemotePlaceholder');
+    $localWrap = $('#callLocalWrap');
     $localVideo = $('#callLocalVideo');
     $localPlaceholder = $('#callLocalPlaceholder');
 
@@ -145,6 +193,7 @@ const Calls = (function ($) {
     $('#activeCallEndBtn').on('click', hangup);
     $muteBtn.on('click', toggleMute);
     $cameraBtn.on('click', toggleCamera);
+    $screenShareBtn.on('click', toggleScreenShare);
 
     // Fetched once and cached for the session — backend/config.py's
     // ICE_STUN_URLS/TURN_* env vars are the source of truth; this just
@@ -576,19 +625,29 @@ const Calls = (function ($) {
     pc.ontrack = function (e) {
       if (e.track.kind === 'video') {
         // The receiver side of the SAME call/offer this whole module already
-        // negotiates — never a second connection. Only ever fires for a
-        // video call (an audio call's SDP has no video m-line at all), so
-        // this is fully inert for audio calls, matching the task's "extend,
-        // don't fork" requirement.
-        $remoteVideo[0].srcObject = e.streams[0];
-        state.remoteVideoTrack = e.track;
-        // A track that arrives already muted (e.g. the sender started with
-        // its camera off) needs the placeholder shown immediately, not just
-        // on the next mute/unmute event.
-        updateRemoteVideoVisibility();
-        e.track.onmute = updateRemoteVideoVisibility;
-        e.track.onunmute = updateRemoteVideoVisibility;
-        e.track.onended = updateRemoteVideoVisibility;
+        // negotiates — never a second connection. A video call's own camera
+        // track (existing behavior, untouched) and an audio call's
+        // screen-share track (feature C) are mutually exclusive — call_type
+        // never changes (see startScreenShare), so whichever one this call
+        // actually is tells the two apart with no new signal needed.
+        if (state.callType === 'video') {
+          $remoteVideo[0].srcObject = e.streams[0];
+          state.remoteVideoTrack = e.track;
+          // A track that arrives already muted (e.g. the sender started with
+          // its camera off) needs the placeholder shown immediately, not
+          // just on the next mute/unmute event.
+          updateRemoteVideoVisibility();
+          e.track.onmute = updateRemoteVideoVisibility;
+          e.track.onunmute = updateRemoteVideoVisibility;
+          e.track.onended = updateRemoteVideoVisibility;
+        } else {
+          $remoteVideo[0].srcObject = e.streams[0];
+          state.remoteScreenTrack = e.track;
+          updateRemoteScreenVisibility();
+          e.track.onmute = updateRemoteScreenVisibility;
+          e.track.onunmute = updateRemoteScreenVisibility;
+          e.track.onended = updateRemoteScreenVisibility;
+        }
       } else {
         $remoteAudio[0].srcObject = e.streams[0];
       }
@@ -637,11 +696,40 @@ const Calls = (function ($) {
 
   function handleSignal(signal) {
     if (signal.message_type === 'offer') {
-      state.pendingOffer = signal.payload.sdp;
+      // The initial handshake's offer (caller -> receiver, before the call
+      // is even accepted) vs. a screen-share renegotiation offer (either
+      // side, only once the connection already has a remote description
+      // from that initial handshake) are told apart by connection state,
+      // not by anything in the signal itself — see the module docstring.
+      if (state.pc && state.pc.currentRemoteDescription) {
+        handleRenegotiationOffer(signal.payload.sdp);
+      } else {
+        state.pendingOffer = signal.payload.sdp;
+      }
       return;
     }
 
     if (signal.message_type === 'answer') {
+      // A renegotiation THIS side itself started (see renegotiate) always
+      // takes priority over the original-handshake branch below —
+      // state.role === 'caller' alone can't tell the two apart, since the
+      // caller is exactly who'd send a renegotiation offer too.
+      if (state.pendingRenegotiationResolve) {
+        const resolve = state.pendingRenegotiationResolve;
+        const reject = state.pendingRenegotiationReject;
+        clearPendingRenegotiation();
+        state.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp))
+          .then(flushPendingCandidates)
+          .then(function () {
+            state.negotiating = false;
+            resolve();
+          })
+          .catch(function (err) {
+            state.negotiating = false;
+            reject(err);
+          });
+        return;
+      }
       if (state.pc && state.role === 'caller') {
         state.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp)).then(flushPendingCandidates);
       }
@@ -664,6 +752,12 @@ const Calls = (function ($) {
     if (signal.message_type === 'camera-state') {
       state.remoteCameraOn = !!signal.payload.enabled;
       updateRemoteVideoVisibility();
+      return;
+    }
+
+    if (signal.message_type === 'screen-share-state') {
+      state.remoteScreenSharing = !!signal.payload.enabled;
+      renderVideoPanel(); // its own visibility depends on remoteScreenSharing too (unlike camera-state, which never hides the panel) — this covers updateRemoteScreenVisibility() too
     }
   }
 
@@ -682,6 +776,119 @@ const Calls = (function ($) {
       method: 'POST',
       data: { message_type: messageType, payload: payload }
     });
+  }
+
+  // --- Renegotiation (screen sharing) --------------------------------------
+  // Only ever triggered explicitly — starting/stopping a screen share adding
+  // its FIRST track to the connection (see startScreenShare) — never from an
+  // automatic onnegotiationneeded listener: the existing initial offer/
+  // answer flow in startCall()/acceptCall() already manages the connection's
+  // very first negotiation manually, and a generic onnegotiationneeded
+  // handler on top of that would risk firing a second, competing offer for
+  // that same initial negotiation. Because either side can click Share
+  // Screen, this still needs a glare guard for the (rare) case both sides
+  // renegotiate at once — a scoped version of the standard "perfect
+  // negotiation" pattern, reusing the caller/receiver split the initial
+  // handshake already has as its polite/impolite roles (the receiver — the
+  // one who normally answers rather than offers — yields).
+
+  function clearPendingRenegotiation() {
+    clearTimeout(state.renegotiationTimeout);
+    state.renegotiationTimeout = null;
+    state.pendingRenegotiationResolve = null;
+    state.pendingRenegotiationReject = null;
+  }
+
+  /** Sends a fresh offer for the CURRENT state of the connection (i.e. after
+   * a local addTrack) and resolves once the matching answer has been
+   * received and applied — used only for screen share's one-time "first
+   * track added this call" renegotiation (see startScreenShare). */
+  function renegotiate() {
+    if (!state.pc) return Promise.reject(new Error('No active connection'));
+    state.negotiating = true;
+    renderScreenShareButton();
+
+    return state.pc.createOffer()
+      .then(function (offer) { return state.pc.setLocalDescription(offer); })
+      .then(function () {
+        sendSignal('offer', { sdp: state.pc.localDescription });
+        return new Promise(function (resolve, reject) {
+          state.pendingRenegotiationResolve = resolve;
+          state.pendingRenegotiationReject = reject;
+          state.renegotiationTimeout = setTimeout(function () {
+            clearPendingRenegotiation();
+            state.negotiating = false;
+            reject(new Error('Renegotiation timed out'));
+          }, CALL_RENEGOTIATION_TIMEOUT_MS);
+        });
+      })
+      .catch(function (err) {
+        // A collision loss (see handleRenegotiationOffer) tags its rejection
+        // with .superseded — in that one case `negotiating` is deliberately
+        // left alone: handleRenegotiationOffer already flipped it back to
+        // true for its OWN answering flow by the time this runs (a rollback
+        // is itself async), and it owns clearing it in its own finally.
+        // Resetting it here too would let a second Share Screen click sneak
+        // in mid-answer and create a real duplicate offer.
+        if (!(err && err.superseded)) state.negotiating = false;
+        clearPendingRenegotiation();
+        throw err;
+      })
+      .finally(function () { renderScreenShareButton(); });
+  }
+
+  /** Handles an incoming renegotiation offer — glare-guarded (see above)
+   * against a local renegotiate() this side may ALSO have outstanding right
+   * now (both sides clicked Share Screen at once). */
+  function handleRenegotiationOffer(sdp) {
+    if (!state.pc) return;
+    const polite = state.role === 'receiver';
+    const collision = state.negotiating;
+
+    if (collision && !polite) {
+      return; // impolite side: drop the incoming offer, keep waiting on its own
+    }
+
+    const rollback = collision
+      ? state.pc.setLocalDescription({ type: 'rollback' })
+      : Promise.resolve();
+
+    state.negotiating = true;
+    renderScreenShareButton();
+
+    rollback
+      .then(function () {
+        if (collision) {
+          // This side's own outstanding renegotiate() lost the race —
+          // reject it (tagged .superseded — see renegotiate()'s catch) so
+          // startScreenShare's caller can roll its optimistic local UI back
+          // instead of leaving it stuck "sharing", without that rejection
+          // clobbering the `negotiating` flag THIS answering flow just set.
+          if (state.pendingRenegotiationReject) {
+            const reject = state.pendingRenegotiationReject;
+            clearPendingRenegotiation();
+            const supersededError = new Error('Renegotiation superseded by remote offer');
+            supersededError.superseded = true;
+            reject(supersededError);
+          }
+        }
+        return state.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      })
+      .then(flushPendingCandidates)
+      .then(function () { return state.pc.createAnswer(); })
+      .then(function (answer) { return state.pc.setLocalDescription(answer); })
+      .then(function () {
+        sendSignal('answer', { sdp: state.pc.localDescription });
+      })
+      .catch(function () {
+        // A failed renegotiation-answer just means this particular media
+        // change didn't take — the call itself (audio, and whatever was
+        // already negotiated before) stays completely unaffected.
+      })
+      .finally(function () {
+        state.negotiating = false;
+        renderScreenShareButton();
+      });
   }
 
   function startConnectTimeout() {
@@ -770,12 +977,224 @@ const Calls = (function ($) {
    * because this side toggled its own camera off or never had one to begin
    * with (audio call, or a downgraded video call — see acquireLocalMedia). */
   function renderLocalVideoPip() {
+    // Unconditionally shown for a video call (unlike renderLocalScreenPip's
+    // wrap below, which hides itself entirely when this side isn't the one
+    // sharing) — a video call always has ITS OWN local feed or camera-off
+    // placeholder to show, so always undo any previous call's screen-share
+    // wrap hiding here regardless of which state that call last left it in.
+    $localWrap.prop('hidden', false);
     const active = hasVideoTrack() && state.cameraOn;
     if (active && $localVideo[0].srcObject !== state.localStream) {
       $localVideo[0].srcObject = state.localStream;
     }
     $localVideo.prop('hidden', !active);
     $localPlaceholder.prop('hidden', active);
+  }
+
+  // --- Screen sharing (audio calls only) -----------------------------------
+  // Entirely independent of mute above — a separate track, a separate flag,
+  // a separate button — same "never coupled" requirement toggleCamera's
+  // section already follows for mic vs. camera: stopping/starting the
+  // screen share here never touches state.localStream (the microphone
+  // track) at all, in either direction.
+
+  function screenShareSupported() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  }
+
+  function toggleScreenShare() {
+    if (state.screenShareActive) {
+      stopScreenShare(false);
+    } else {
+      startScreenShare();
+    }
+  }
+
+  /** Only reachable for an audio call that's actually connected — never
+   * called automatically (not on incoming, not on accept — task
+   * requirement), only from the user's own Share Screen click. */
+  function startScreenShare() {
+    if (state.phase !== 'connected' || state.callType !== 'audio') return;
+    if (state.screenShareActive || state.negotiating) return; // already sharing, or a renegotiation is already in flight — never a second concurrent attempt
+    if (!screenShareSupported()) {
+      Ping.showToast('Screen sharing is not supported in this browser.', 'error');
+      return;
+    }
+
+    const myGeneration = state.pollGeneration;
+
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+      .then(function (stream) {
+        // The call may have ended (or moved on to a new one) while the
+        // browser's screen-picker dialog was open — same staleness guard
+        // startCall()/acceptCall() use for their own async media prompts.
+        if (state.pollGeneration !== myGeneration || state.phase !== 'connected') {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return;
+        }
+
+        const track = stream.getVideoTracks()[0];
+        state.screenStream = stream;
+        state.screenTrack = track;
+        // The task's mandatory case: the user picks "Stop sharing" from the
+        // BROWSER's own native screen-share indicator/UI rather than PING's
+        // button — this is the only way that's ever surfaced to the page.
+        track.onended = function () {
+          if (state.screenShareActive) stopScreenShare(true);
+        };
+
+        state.screenShareActive = true;
+        renderActiveBar();
+        renderVideoPanel();
+
+        if (state.screenSender) {
+          // Re-sharing later in the SAME call: the sender/transceiver from
+          // the first share is still there (see stopScreenShare) — reuse it
+          // via replaceTrack, which never needs renegotiation, instead of
+          // ever calling addTrack a second time (would risk a duplicate
+          // sender/m-line).
+          return state.screenSender.replaceTrack(track).then(function () {
+            sendSignal('screen-share-state', { enabled: true });
+          });
+        }
+
+        // First screen share this call: the connection has no video
+        // transceiver yet (an audio call's SDP never gets one on its own),
+        // so this is the one time adding this track actually changes the
+        // connection's shape and needs a real renegotiation.
+        state.screenSender = state.pc.addTrack(track, stream);
+        return renegotiate()
+          .then(function () {
+            sendSignal('screen-share-state', { enabled: true });
+          })
+          .catch(function (err) {
+            if (state.pc && state.screenSender) {
+              state.pc.removeTrack(state.screenSender);
+              state.screenSender = null;
+            }
+            throw err;
+          });
+      })
+      .catch(function (err) {
+        // The call itself already ended (hangup/reject/timeout/failure) by
+        // the time this rejects — cleanupRtc() already tore everything
+        // screen-share-related down; reporting a screen-share error on top
+        // of that would just be a confusing, unrelated toast.
+        if (state.phase !== 'connected') return;
+        handleScreenShareError(err);
+        // Never leave the optimistic "sharing" UI up over a failed
+        // renegotiation — the getDisplayMedia stream itself is stopped by
+        // stopScreenShare's own cleanup below when it was already acquired.
+        if (state.screenShareActive) stopScreenShare(true, true);
+      });
+  }
+
+  /**
+   * @param fromBrowser true when this is the browser's own native "Stop
+   *   sharing" control firing screenTrack.onended, rather than PING's own
+   *   button — task requirement: both must land in exactly the same state.
+   * @param silent suppress the toast — used when startScreenShare() itself
+   *   is unwinding a failed renegotiation (its own error toast already
+   *   covers it).
+   */
+  function stopScreenShare(fromBrowser, silent) {
+    if (!state.screenShareActive && !state.screenStream) return;
+
+    if (state.screenTrack) {
+      state.screenTrack.onended = null;
+      state.screenTrack.stop();
+    }
+    if (state.screenStream) {
+      state.screenStream.getTracks().forEach(function (t) { t.stop(); }); // releases the OS-level screen-capture indicator
+    }
+    state.screenStream = null;
+    state.screenTrack = null;
+    state.screenShareActive = false;
+
+    // Sender/transceiver is deliberately kept (not removeTrack()'d) so a
+    // later re-share this same call can reuse it with no renegotiation —
+    // see startScreenShare. Microphone is never touched here in any way.
+    if (state.screenSender) {
+      state.screenSender.replaceTrack(null).catch(function () {});
+    }
+
+    sendSignal('screen-share-state', { enabled: false });
+    renderActiveBar();
+    renderVideoPanel();
+
+    if (fromBrowser && !silent) {
+      Ping.showToast('Screen sharing stopped', 'success');
+    }
+  }
+
+  function handleScreenShareError(err) {
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'AbortError') {
+      // The user dismissed/cancelled the browser's own screen-picker dialog
+      // — not a failure, and explicitly NOT a call failure (task
+      // requirement) — the audio call just continues exactly as it was.
+      Ping.showToast('Screen sharing cancelled', 'error');
+      return;
+    }
+    if (name === 'NotFoundError') {
+      Ping.showToast('No screen or window is available to share.', 'error');
+      return;
+    }
+    if (name === 'NotReadableError') {
+      Ping.showToast('Your screen could not be captured — it may be blocked by another application.', 'error');
+      return;
+    }
+    if (name === 'OverconstrainedError') {
+      Ping.showToast('Screen sharing is not supported with the requested settings.', 'error');
+      return;
+    }
+    Ping.showToast('Unable to start screen sharing.', 'error');
+  }
+
+  function renderScreenShareButton() {
+    $screenShareBtn
+      .prop('hidden', state.callType !== 'audio')
+      .prop('disabled', state.negotiating)
+      .toggleClass('is-active', state.screenShareActive)
+      .attr('aria-label', state.screenShareActive ? 'Stop sharing your screen' : 'Share your screen')
+      .attr('title', state.screenShareActive ? 'Stop Sharing' : 'Share Screen')
+      .find('i')
+      .attr('data-lucide', state.screenShareActive ? 'screen-share-off' : 'screen-share');
+    Ping.renderIcons($screenShareBtn[0]);
+    $sharingBadge.prop('hidden', !state.screenShareActive);
+  }
+
+  /** Mirrors updateRemoteVideoVisibility, for the screen-share track instead
+   * of a camera track — driven by the 'screen-share-state' signal rather
+   * than remoteCameraOn (see the module docstring for why track.muted alone
+   * isn't trusted), with track.muted still checked as the same defensive
+   * extra updateRemoteVideoVisibility already uses. */
+  function updateRemoteScreenVisibility() {
+    const track = state.remoteScreenTrack;
+    const active = !!track && track.readyState === 'live' && !track.muted && state.remoteScreenSharing;
+    $remoteVideo.prop('hidden', !active);
+    $remotePlaceholder.prop('hidden', active);
+  }
+
+  /** Mirrors renderLocalVideoPip, for THIS side's own screen-share preview
+   * instead of a camera preview. Deliberately not mirrored (see
+   * .call-video-panel--screen-share in main.css) — a shared screen, unlike a
+   * self-facing camera, isn't something people expect flipped — and the
+   * whole PIP is hidden outright (not just an empty placeholder) whenever
+   * this side isn't the one sharing, since "not sharing" has nothing local
+   * worth previewing the way a camera-off placeholder does. */
+  function renderLocalScreenPip() {
+    const active = state.screenShareActive && !!state.screenStream;
+    $localWrap.prop('hidden', !active);
+    if (!active) {
+      if ($localVideo[0].srcObject) $localVideo[0].srcObject = null;
+      return;
+    }
+    if ($localVideo[0].srcObject !== state.screenStream) {
+      $localVideo[0].srcObject = state.screenStream;
+    }
+    $localVideo.prop('hidden', false);
+    $localPlaceholder.prop('hidden', true);
   }
 
   // --- Teardown / reset -------------------------------------------------
@@ -803,6 +1222,39 @@ const Calls = (function ($) {
       state.remoteVideoTrack.onended = null;
       state.remoteVideoTrack = null;
     }
+    // Screen share teardown — covers every path that can end a call (hangup,
+    // reject, cancel, timeout, connection failure) since they all funnel
+    // through here via endWithReason/resetToIdle. Stopping these tracks is
+    // what actually releases the browser's screen-capture indicator/OS
+    // permission, same as stopping localStream's tracks above does for the
+    // camera/mic — task requirement: no screen capture survives the call.
+    if (state.screenTrack) {
+      state.screenTrack.onended = null;
+      state.screenTrack.stop();
+      state.screenTrack = null;
+    }
+    if (state.screenStream) {
+      state.screenStream.getTracks().forEach(function (t) { t.stop(); });
+      state.screenStream = null;
+    }
+    state.screenSender = null;
+    state.screenShareActive = false;
+    state.remoteScreenSharing = false;
+    if (state.remoteScreenTrack) {
+      state.remoteScreenTrack.onmute = null;
+      state.remoteScreenTrack.onunmute = null;
+      state.remoteScreenTrack.onended = null;
+      state.remoteScreenTrack = null;
+    }
+    // Reject rather than silently drop — a caller awaiting renegotiate()'s
+    // promise (startScreenShare) must not hang forever if the call ends
+    // mid-renegotiation.
+    if (state.pendingRenegotiationReject) {
+      const reject = state.pendingRenegotiationReject;
+      clearPendingRenegotiation();
+      reject(new Error('Call ended'));
+    }
+    state.negotiating = false;
     $remoteAudio[0].srcObject = null;
     $remoteVideo[0].srcObject = null;
     $localVideo[0].srcObject = null;
@@ -865,6 +1317,8 @@ const Calls = (function ($) {
     state.muted = false;
     state.cameraOn = false;
     state.remoteCameraOn = true;
+    state.screenShareActive = false;
+    state.remoteScreenSharing = false;
     state.callStartedAt = null;
     render();
     scheduleNextPoll();
@@ -974,11 +1428,20 @@ const Calls = (function ($) {
     // camera icon to look at, let alone a functioning one.
     $cameraBtn.prop('hidden', state.callType !== 'video');
     if (state.callType === 'video') renderCameraButton();
+
+    // Screen sharing is audio-call-only (feature C) — renderScreenShareButton
+    // hides itself for a video call, same split as the camera button above.
+    renderScreenShareButton();
   }
 
   function renderVideoPanel() {
-    const show = state.callType === 'video' && (state.phase === 'connecting' || state.phase === 'connected');
+    const isVideoCall = state.callType === 'video';
+    const sharing = state.screenShareActive || state.remoteScreenSharing;
+    const show = (state.phase === 'connecting' || state.phase === 'connected') && (isVideoCall || sharing);
     $videoPanel.prop('hidden', !show);
+    // Only ever true for an audio call actively sharing/being shared to —
+    // never for a video call, so B's panel sizing/layout is untouched.
+    $videoPanel.toggleClass('call-video-panel--screen-share', !isVideoCall && sharing);
     if (!show) {
       // Belt-and-braces: also cleared in cleanupRtc() on every teardown
       // path, but clearing here too means a stale frame never lingers even
@@ -988,8 +1451,13 @@ const Calls = (function ($) {
       return;
     }
     if (state.otherUser) Avatars.apply($videoPanelAvatar, state.otherUser.name, state.otherUser.avatar_url);
-    updateRemoteVideoVisibility();
-    renderLocalVideoPip();
+    if (isVideoCall) {
+      updateRemoteVideoVisibility();
+      renderLocalVideoPip();
+    } else {
+      updateRemoteScreenVisibility();
+      renderLocalScreenPip();
+    }
   }
 
   function stopPolling() {
