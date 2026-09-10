@@ -4,11 +4,12 @@
  * Chat.openConversation(conversationId, otherUser) whenever a sidebar item
  * or search result resolves to a conversation.
  *
- * No WebSockets yet — while a conversation is open, we just re-fetch and
- * fully replace the message list every POLL_INTERVAL_MS. Replacing (rather
- * than appending) means a message we just sent can never show up twice
- * once the next poll tick confirms it from the server. startPolling() /
- * stopPolling() are the seam a future WebSocket connection would plug into.
+ * No WebSockets yet — while a conversation is open, we just re-fetch every
+ * POLL_INTERVAL_MS and reconcile the response into the existing DOM (see
+ * reconcileMessages) rather than replacing the message list wholesale, so
+ * polling stays visually silent when nothing changed instead of flickering
+ * every row on every tick. startPolling() / stopPolling() are the seam a
+ * future WebSocket connection would plug into.
  */
 const Chat = (function ($) {
   'use strict';
@@ -23,6 +24,11 @@ const Chat = (function ($) {
     messages: [],
     lastMarkedMessageId: null,
     pollHandle: null,
+    // Guards fetchAndRender against overlapping requests (a slow poll tick
+    // still in flight when the next timer fires) - same pattern as
+    // Conversations' pollInFlight, so a stale response can never land after
+    // a newer one already rendered.
+    pollInFlight: false,
     // Which message (if any) currently has its emoji picker open — a render
     // flag, not fetched state, so it survives renderMessages() being called
     // again (poll ticks, sends, reactions) instead of getting wiped along
@@ -111,6 +117,12 @@ const Chat = (function ($) {
     state.openPickerMessageId = null;
     state.replyTo = null;
     state.editingMessage = null;
+    // A request left over from whatever conversation was open before is
+    // about to be made moot by the conversationId change above (see the
+    // stale-conversation check in fetchAndRender) - don't let its eventual
+    // .always() reset leave this flag in the wrong state for the new
+    // conversation's own fetch below.
+    state.pollInFlight = false;
 
     $shell.addClass('app-shell--conversation-open');
     $empty.prop('hidden', true);
@@ -354,6 +366,8 @@ const Chat = (function ($) {
 
   function fetchAndRender(showLoading) {
     if (!state.conversationId) return;
+    if (state.pollInFlight) return; // never let requests overlap - RULE 11
+    state.pollInFlight = true;
     const conversationId = state.conversationId;
 
     if (showLoading) {
@@ -374,6 +388,9 @@ const Chat = (function ($) {
           renderError(Ping.getErrorMessage(xhr, 'Unable to load messages.'));
         }
         // Silent on poll failures — a blip shouldn't disrupt an open conversation.
+      })
+      .always(function () {
+        state.pollInFlight = false;
       });
   }
 
@@ -487,29 +504,102 @@ const Chat = (function ($) {
   }
 
   function renderMessages(scrollToBottomAfter) {
-    $messages.empty();
-
     if (state.messages.length === 0) {
-      const $emptyState = $('<div>', { class: 'chat-status' });
-      $('<p>').text('No messages yet.').appendTo($emptyState);
-      $('<p>').text('Start the conversation.').appendTo($emptyState);
-      $messages.append($emptyState);
+      renderEmptyState();
       return;
     }
 
+    reconcileMessages();
+
+    if (scrollToBottomAfter) {
+      scrollToBottom();
+    }
+  }
+
+  /** Shown in place of the message list for a conversation with no messages
+   * yet. Guarded so a poll tick that still finds zero messages doesn't keep
+   * re-emptying/rebuilding this placeholder every cycle. */
+  function renderEmptyState() {
+    if (!$messages.children('.message-row').length && $messages.children('.chat-status').length) {
+      return; // already showing it - nothing changed
+    }
+    $messages.empty();
+    const $emptyState = $('<div>', { class: 'chat-status' });
+    $('<p>').text('No messages yet.').appendTo($emptyState);
+    $('<p>').text('Start the conversation.').appendTo($emptyState);
+    $messages.append($emptyState);
+  }
+
+  /**
+   * Reconciles state.messages into #chatMessages one message at a time
+   * instead of the old empty()-then-rebuild-everything pass, which is what
+   * caused every row (including unrelated ones) to flicker/replay its
+   * entrance animation - and any playing <video>/<audio> preview to reset -
+   * on every single poll tick, whether or not anything actually changed.
+   *
+   * Each message is keyed by its id (data-message-id, already used
+   * elsewhere - see rerenderRow/scrollToMessage) and stamped with a
+   * signature (data-sig) of its full JSON so an unchanged message can be
+   * detected and left completely untouched: new id -> append a row; known
+   * id whose signature changed (edit, reaction, etc.) -> replace just that
+   * row in place; known id, same signature -> do nothing.
+   *
+   * Messages are append-only (no delete-message endpoint exists), so no
+   * reordering pass is needed - new ids are simply appended in the order
+   * they appear in state.messages, which the API already returns
+   * chronologically.
+   */
+  function reconcileMessages() {
+    $messages.children('.chat-status').remove(); // clear the "no messages yet" placeholder, if any
+
+    const seenIds = {};
+
     state.messages.forEach(function (message) {
-      const $row = renderMessageRow(message);
-      $messages.append($row);
+      seenIds[message.id] = true;
+      const sig = messageSignature(message);
+      const $existing = $messages.children('.message-row[data-message-id="' + message.id + '"]');
+
+      if (!$existing.length) {
+        const $row = buildStampedRow(message, sig);
+        $messages.append($row);
+        Ping.renderIcons($row[0]); // scoped to this one new row - see renderIcons' docstring for why
+        if (state.openPickerMessageId === message.id) {
+          positionPicker($row);
+        }
+        return;
+      }
+
+      if ($existing.attr('data-sig') === sig) return; // unchanged - leave this row's DOM completely alone
+
+      const $row = buildStampedRow(message, sig);
+      $existing.replaceWith($row);
+      Ping.renderIcons($row[0]);
       if (state.openPickerMessageId === message.id) {
         positionPicker($row);
       }
     });
 
-    Ping.renderIcons();
+    // Defensive only - nothing currently deletes a message - but keeps this
+    // resilient rather than leaving an orphaned row behind if that ever changes.
+    $messages.children('.message-row').each(function () {
+      const id = Number($(this).attr('data-message-id'));
+      if (!seenIds[id]) $(this).remove();
+    });
+  }
 
-    if (scrollToBottomAfter) {
-      scrollToBottom();
-    }
+  /** Every mutable field of a message (content, edited_at, reactions, ...)
+   * is included by stringifying the whole object, the same
+   * change-detection approach Conversations.applyConversations already
+   * uses for the sidebar - so this never needs updating if the message
+   * schema grows a new field later. */
+  function messageSignature(message) {
+    return JSON.stringify(message);
+  }
+
+  function buildStampedRow(message, sig) {
+    const $row = renderMessageRow(message);
+    $row.attr('data-sig', sig || messageSignature(message));
+    return $row;
   }
 
   /**
@@ -550,12 +640,15 @@ const Chat = (function ($) {
       return;
     }
 
-    const $newRow = renderMessageRow(message);
+    // Stamped with the message's current signature so the next poll tick's
+    // reconcileMessages() recognizes this row as already up to date instead
+    // of redundantly replacing it again with identical content.
+    const $newRow = buildStampedRow(message);
     $existingRow.replaceWith($newRow);
     if (state.openPickerMessageId === messageId) {
       positionPicker($newRow);
     }
-    Ping.renderIcons();
+    Ping.renderIcons($newRow[0]); // scoped to this one row - see Ping.renderIcons' docstring for why
   }
 
   function renderMessageRow(message) {

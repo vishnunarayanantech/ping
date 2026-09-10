@@ -166,59 +166,116 @@ const Conversations = (function ($) {
     return count > 99 ? '99+' : String(count);
   }
 
+  /**
+   * Reconciles state.conversations into #conversationList one item at a
+   * time instead of the old empty()-then-rebuild-everything pass, so a poll
+   * tick that changed e.g. one conversation's unread count doesn't also
+   * flicker/rebuild every other, untouched conversation item.
+   *
+   * Unlike chat messages (append-only), conversation order DOES change
+   * between polls - a conversation with fresh activity moves to the top -
+   * so besides "build if new" / "replace if content changed" / "leave
+   * alone if unchanged" (keyed by conversation id + a data-sig of its full
+   * JSON, same approach as chat.js's reconcileMessages), this also walks
+   * the list in the server's order and repositions any item that isn't
+   * already in the right slot.
+   */
   function render() {
-    $list.empty();
-
     if (state.conversations.length === 0) {
-      const $empty = $('<div>', { class: 'conversation-list__empty' });
-      $('<p>').text('No conversations yet.').appendTo($empty);
-      $('<p>').text('Search for a colleague to start chatting.').appendTo($empty);
-      $list.append($empty);
+      renderEmptyList();
       return;
     }
+    // Clear one-off placeholder states that render() used to wipe via its
+    // old unconditional $list.empty() - the initial-load skeleton and the
+    // "no conversations" message - now that the normal path below only
+    // touches the specific items that actually changed.
+    $list.children('.conversation-list__empty, .conversation-skeleton-row').remove();
+
+    const seenIds = {};
+    let previousEl = null;
 
     state.conversations.forEach(function (conversation) {
-      const otherUser = conversation.other_user;
-      const isUnread = conversation.unread_count > 0;
+      seenIds[conversation.id] = true;
+      const sig = JSON.stringify(conversation);
+      let $item = $list.children('.conversation-item[data-conversation-id="' + conversation.id + '"]');
 
-      const $item = $('<button>', {
-        type: 'button',
-        class: 'conversation-item' + (isUnread ? ' conversation-item--unread' : ''),
-        'data-conversation-id': conversation.id
-      });
-
-      const $avatar = $('<span>', { class: 'avatar avatar--sm' }).appendTo($item);
-      Avatars.apply($avatar, otherUser.name, otherUser.avatar_url);
-
-      const $info = $('<span>', { class: 'conversation-item__info' });
-      const $top = $('<span>', { class: 'conversation-item__top' });
-      $('<span>', { class: 'conversation-item__name' }).text(otherUser.name).appendTo($top);
-
-      const $meta = $('<span>', { class: 'conversation-item__meta' });
-      $('<span>', { class: 'conversation-item__time' })
-        .text(conversation.last_message ? formatRelativeTime(conversation.last_message.created_at) : '')
-        .appendTo($meta);
-      if (isUnread) {
-        $('<span>', { class: 'unread-badge' }).text(formatUnreadCount(conversation.unread_count)).appendTo($meta);
+      if (!$item.length) {
+        $item = buildConversationItem(conversation, sig);
+      } else if ($item.attr('data-sig') !== sig) {
+        const $newItem = buildConversationItem(conversation, sig);
+        $item.replaceWith($newItem);
+        $item = $newItem;
       }
-      $meta.appendTo($top);
 
-      $top.appendTo($info);
-
-      $('<span>', { class: 'conversation-item__preview' })
-        .text(conversation.last_message ? conversation.last_message.content : 'No messages yet')
-        .appendTo($info);
-
-      $info.appendTo($item);
-
-      $item.toggleClass('is-active', conversation.id === state.activeConversationId);
-
-      $item.on('click', function () {
-        openConversation(conversation.id, otherUser);
-      });
-
-      $list.append($item);
+      if (previousEl === null) {
+        if (!$list.children().first().is($item)) {
+          $list.prepend($item);
+        }
+      } else if (previousEl.next()[0] !== $item[0]) {
+        $item.insertAfter(previousEl);
+      }
+      previousEl = $item;
     });
+
+    $list.children('.conversation-item').each(function () {
+      const id = Number($(this).attr('data-conversation-id'));
+      if (!seenIds[id]) $(this).remove(); // defensive - conversations aren't currently deletable
+    });
+  }
+
+  function renderEmptyList() {
+    if (!$list.children('.conversation-item').length && $list.children('.conversation-list__empty').length) {
+      return; // already showing it - nothing changed
+    }
+    $list.empty();
+    const $empty = $('<div>', { class: 'conversation-list__empty' });
+    $('<p>').text('No conversations yet.').appendTo($empty);
+    $('<p>').text('Search for a colleague to start chatting.').appendTo($empty);
+    $list.append($empty);
+  }
+
+  function buildConversationItem(conversation, sig) {
+    const otherUser = conversation.other_user;
+    const isUnread = conversation.unread_count > 0;
+
+    const $item = $('<button>', {
+      type: 'button',
+      class: 'conversation-item' + (isUnread ? ' conversation-item--unread' : ''),
+      'data-conversation-id': conversation.id,
+      'data-sig': sig
+    });
+
+    const $avatar = $('<span>', { class: 'avatar avatar--sm' }).appendTo($item);
+    Avatars.apply($avatar, otherUser.name, otherUser.avatar_url);
+
+    const $info = $('<span>', { class: 'conversation-item__info' });
+    const $top = $('<span>', { class: 'conversation-item__top' });
+    $('<span>', { class: 'conversation-item__name' }).text(otherUser.name).appendTo($top);
+
+    const $meta = $('<span>', { class: 'conversation-item__meta' });
+    $('<span>', { class: 'conversation-item__time' })
+      .text(conversation.last_message ? formatRelativeTime(conversation.last_message.created_at) : '')
+      .appendTo($meta);
+    if (isUnread) {
+      $('<span>', { class: 'unread-badge' }).text(formatUnreadCount(conversation.unread_count)).appendTo($meta);
+    }
+    $meta.appendTo($top);
+
+    $top.appendTo($info);
+
+    $('<span>', { class: 'conversation-item__preview' })
+      .text(conversation.last_message ? conversation.last_message.content : 'No messages yet')
+      .appendTo($info);
+
+    $info.appendTo($item);
+
+    $item.toggleClass('is-active', conversation.id === state.activeConversationId);
+
+    $item.on('click', function () {
+      openConversation(conversation.id, otherUser);
+    });
+
+    return $item;
   }
 
   /**

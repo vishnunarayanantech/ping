@@ -23,10 +23,18 @@ const Ping = (function ($) {
     document.title = pageTitle ? pageTitle + ' — ' + APP_CONFIG.appName : APP_CONFIG.appName;
   }
 
-  /** Render any Lucide icon elements added/changed since the last pass. */
-  function renderIcons() {
+  /**
+   * Render Lucide icon placeholders (`<i data-lucide="...">`) into inline
+   * SVGs. lucide.createIcons() matches every element carrying the
+   * data-lucide attribute - which its own output SVGs keep - so an
+   * unscoped call re-creates *every* icon already on the page, not just
+   * new ones. Pass a specific DOM element as `root` (e.g. a single
+   * newly-built message row) to limit the pass to icons inside it; omit it
+   * for the normal whole-page cases (initial render, toasts, modals).
+   */
+  function renderIcons(root) {
     if (window.lucide) {
-      window.lucide.createIcons();
+      window.lucide.createIcons({ root: root });
     }
   }
 
