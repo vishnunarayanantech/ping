@@ -2359,6 +2359,133 @@ p {
   height: 17px;
 }
 
+/* Video calls only (see calls.js's renderActiveBar) — mirrors
+   .active-call-bar__mute.is-active's "highlighted = off" convention, so a
+   red camera icon reads as "camera is OFF" just like a red mic icon already
+   reads as "mic is muted". */
+.active-call-bar__camera.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.active-call-bar__camera:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 11d. Video calling — local camera preview inside the outgoing/incoming
+   call-panel, plus the floating connecting/connected video panel. Extends
+   11c above; nothing here is reachable for an audio call (state.callType
+   never becomes 'video'), so audio calling's UI is untouched. */
+.call-panel__preview-video {
+  width: 120px;
+  height: 120px;
+  margin-bottom: var(--space-sm);
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  background: #111;
+  transform: scaleX(-1); /* mirror, like every other self-facing camera preview */
+}
+
+.call-panel__type {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  margin: -0.25em 0 0.5em;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.call-panel__type svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Floating video panel: remote video fills it, local video floats as a PIP
+   in its corner — see calls.js's renderVideoPanel(). Positioned below
+   #activeCallBar (which sits at top:0) rather than overlapping it, so both
+   the compact controls bar and the video feed stay visible and usable at
+   once; kept well under .call-overlay's z-index (1000) so it never
+   competes with the full-screen calling/incoming panel. */
+.call-video-panel {
+  position: fixed;
+  top: 64px;
+  right: var(--space-lg);
+  z-index: 480;
+  width: 280px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #111;
+  box-shadow: var(--shadow-lg);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.call-video-panel__remote-wrap {
+  position: absolute;
+  inset: 0;
+}
+
+.call-video-panel__remote {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.call-video-panel__local-wrap {
+  position: absolute;
+  right: var(--space-xs);
+  bottom: var(--space-xs);
+  width: 84px;
+  height: 84px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #222;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: var(--shadow-sm);
+}
+
+.call-video-panel__local {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1); /* mirror, like the outgoing preview above */
+}
+
+/* Shown instead of the <video> above it whenever that side has no live
+   video to display — no camera on this call at all, the other side's
+   camera is currently off (see calls.js's updateRemoteVideoVisibility), or
+   this side's own camera is toggled off (see renderLocalVideo). */
+.call-video-panel__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1b1c22;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.call-video-panel__placeholder--local svg {
+  width: 22px;
+  height: 22px;
+}
+
+@media (max-width: 640px) {
+  .call-video-panel {
+    width: 168px;
+    top: auto;
+    bottom: calc(var(--space-lg) + 64px); /* clear the composer/input bar */
+    right: var(--space-sm);
+  }
+
+  .call-video-panel__local-wrap {
+    width: 56px;
+    height: 56px;
+  }
+}
+
 /* 12. Profile page ------------------------------------------------------------------------ */
 .profile-page {
   max-width: 780px;

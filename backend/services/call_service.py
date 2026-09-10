@@ -75,7 +75,7 @@ def apply_ring_timeout(db: Session, call: Call) -> Call:
     return call
 
 
-def create_call(db: Session, caller_id: int, receiver_id: int, conversation_id: int) -> Call:
+def create_call(db: Session, caller_id: int, receiver_id: int, conversation_id: int, call_type: str = "audio") -> Call:
     """
     Creates the call row. If either party is already on an active call, the
     row is created (per the task's data-model spec) but immediately
@@ -84,6 +84,10 @@ def create_call(db: Session, caller_id: int, receiver_id: int, conversation_id: 
     looks at ACTIVE_STATUSES), so a busy attempt is invisible to them, not a
     missed-call notification. This check is the actual enforcement (routers/
     calls.py never takes the frontend's word for whether either side is free).
+
+    call_type is already validated by schemas.CallCreate before reaching
+    here — see models.Call's docstring for why it's fixed for the life of
+    the row regardless of what either side's camera actually ends up doing.
     """
     busy = get_active_call_for_user(db, caller_id) is not None or get_active_call_for_user(db, receiver_id) is not None
 
@@ -92,6 +96,7 @@ def create_call(db: Session, caller_id: int, receiver_id: int, conversation_id: 
         caller_id=caller_id,
         receiver_id=receiver_id,
         status="busy" if busy else "ringing",
+        call_type=call_type,
         ended_at=datetime.now(timezone.utc) if busy else None,
     )
     db.add(call)
@@ -159,6 +164,7 @@ def to_call_out(call: Call) -> CallOut:
         id=call.id,
         conversation_id=call.conversation_id,
         status=call.status,
+        call_type=call.call_type,
         caller=UserOut.model_validate(call.caller),
         receiver=UserOut.model_validate(call.receiver),
         created_at=call.created_at,

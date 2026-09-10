@@ -400,22 +400,39 @@ class MarkReadResponse(BaseModel):
     message: str
 
 
-# --- Audio calling --------------------------------------------------------
+# --- Calling (audio/video) -------------------------------------------------
+
+# The only two kinds of call this app creates — see models.Call's docstring
+# for why call_type is fixed at creation and never changes afterward.
+CALL_TYPES = {"audio", "video"}
+
 
 class CallCreate(BaseModel):
     """POST /calls body. Deliberately has no receiver_id field — the callee
     is always derived server-side from the conversation's OTHER member (see
     routers/calls.py), never taken from the client, same reasoning as
     ProfileUpdate/MessageUpdate's docstrings for why their schemas omit
-    fields that would let a request body name a different target."""
+    fields that would let a request body name a different target.
+
+    call_type defaults to "audio" so older frontend code (or any direct API
+    caller) that never sends it still gets exactly the old behavior."""
 
     conversation_id: int
+    call_type: str = "audio"
+
+    @field_validator("call_type")
+    @classmethod
+    def _valid_call_type(cls, value: str) -> str:
+        if value not in CALL_TYPES:
+            raise ValueError("Unsupported call type")
+        return value
 
 
 class CallOut(BaseModel):
     id: int
     conversation_id: int
     status: str
+    call_type: str
     caller: UserOut
     receiver: UserOut
     created_at: datetime
@@ -449,11 +466,16 @@ class CallActiveResponse(BaseModel):
     call: Optional[CallOut] = None
 
 
-# The only three WebRTC signaling message shapes this feature ever relays —
+# The only WebRTC/call-UI signaling message shapes this feature ever relays —
 # restricting the backend to this set is the same "don't let a direct API
 # call smuggle arbitrary content through" reasoning as
-# schemas.ALLOWED_REACTION_EMOJIS.
-CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate"}
+# schemas.ALLOWED_REACTION_EMOJIS. "camera-state" is the one non-WebRTC
+# entry: disabling a local video track (see calls.js's toggleCamera) doesn't
+# reliably surface as the browser's native track-muted event on the OTHER
+# side (some engines just send black frames instead of actually pausing the
+# RTP stream), so the camera ON/OFF indicator needs its own explicit,
+# trivial message over this SAME relay rather than a new channel.
+CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state"}
 
 
 class CallSignalCreate(BaseModel):

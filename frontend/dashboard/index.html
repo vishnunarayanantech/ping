@@ -28,9 +28,37 @@
     <button type="button" class="icon-btn active-call-bar__mute" id="activeCallMuteBtn" aria-label="Mute microphone" title="Mute">
       <i data-lucide="mic" aria-hidden="true"></i>
     </button>
+    <!-- Video calls only (see calls.js's renderActiveBar) — hidden entirely
+         for an audio call so that call's bar is pixel-identical to before. -->
+    <button type="button" class="icon-btn active-call-bar__camera" id="activeCallCameraBtn" aria-label="Turn off camera" title="Turn off camera" hidden>
+      <i data-lucide="video" aria-hidden="true"></i>
+    </button>
     <button type="button" class="call-btn call-btn--end active-call-bar__end" id="activeCallEndBtn" aria-label="End call" title="End call">
       <i data-lucide="phone-off" aria-hidden="true"></i>
     </button>
+  </div>
+
+  <!-- Floating video panel: remote video primary, local video PIP. Only
+       relevant for video calls, and only once the call is actually
+       connecting/connected (see calls.js's renderVideoPanel) — the
+       ring-out/incoming states use #callOverlay below instead, same split
+       #activeCallBar already uses for audio. Deliberately its own floating
+       element rather than living inside #activeCallBar (52px tall, no room
+       for video) or #appShell (must float above the chat, non-blocking, and
+       survive switching conversations same as #activeCallBar does). -->
+  <div class="call-video-panel" id="callVideoPanel" hidden>
+    <div class="call-video-panel__remote-wrap">
+      <video class="call-video-panel__remote" id="callRemoteVideo" autoplay playsinline></video>
+      <div class="call-video-panel__placeholder" id="callRemotePlaceholder">
+        <span class="avatar avatar--lg" id="callVideoPanelAvatar"></span>
+      </div>
+    </div>
+    <div class="call-video-panel__local-wrap">
+      <video class="call-video-panel__local" id="callLocalVideo" autoplay muted playsinline></video>
+      <div class="call-video-panel__placeholder call-video-panel__placeholder--local" id="callLocalPlaceholder" hidden>
+        <i data-lucide="video-off" aria-hidden="true"></i>
+      </div>
+    </div>
   </div>
 
   <div class="app-shell" id="appShell">
@@ -99,6 +127,9 @@
           <span class="chat-header__name" id="chatHeaderName"></span>
           <button type="button" class="icon-btn chat-header__call-btn" id="callBtn" aria-label="Start audio call" title="Audio call">
             <i data-lucide="phone" aria-hidden="true"></i>
+          </button>
+          <button type="button" class="icon-btn chat-header__call-btn" id="videoCallBtn" aria-label="Start video call" title="Video call">
+            <i data-lucide="video" aria-hidden="true"></i>
           </button>
         </header>
 
@@ -180,22 +211,32 @@
     <img class="lightbox__image" id="imageLightboxImg" alt="">
   </div>
 
-  <!-- Audio call overlay: the full-screen, blocking panel for the states
-       that need a decision or are just a brief notice — outgoing (calling),
-       incoming, and the transient declined/missed/busy/failed/ended
-       messages (see calls.js's render()/STATUS_TEXT). Modeled on the SAME
-       overlay/modal architecture as the forward-message modal and image
+  <!-- Audio/video call overlay: the full-screen, blocking panel for the
+       states that need a decision or are just a brief notice — outgoing
+       (calling), incoming, and the transient declined/missed/busy/failed/
+       ended messages (see calls.js's render()/STATUS_TEXT). Modeled on the
+       SAME overlay/modal architecture as the forward-message modal and image
        lightbox above.
 
        Deliberately does NOT cover the "connecting"/"connected" states —
-       once a call is actually under way, #activeCallBar (above, outside
-       #appShell) takes over instead, precisely so the chat stays usable
-       while a call is in progress (task requirement: send a message while
-       a call is active). Only one of the two is ever visible at a time. -->
+       once a call is actually under way, #activeCallBar/#callVideoPanel
+       (above, outside #appShell) take over instead, precisely so the chat
+       stays usable while a call is in progress (task requirement: send a
+       message while a call is active). Only one of the two is ever visible
+       at a time. -->
   <div class="call-overlay" id="callOverlay" hidden>
     <div class="call-panel">
       <span class="avatar avatar--lg" id="callAvatar"></span>
+      <!-- Outgoing video calls only: the caller's own camera feed, shown the
+           moment permission is granted (task requirement) — never shown for
+           "incoming" since the receiver's camera isn't touched before they
+           accept (see calls.js's acceptCall). Swaps in for the avatar above
+           rather than sitting alongside it. -->
+      <video class="call-panel__preview-video" id="callPreviewVideo" autoplay muted playsinline hidden></video>
       <h2 class="call-panel__name" id="callName"></h2>
+      <p class="call-panel__type" id="callTypeLabel" hidden>
+        <i data-lucide="video" aria-hidden="true"></i> Video call
+      </p>
       <p class="call-panel__status" id="callStatusText">Calling…</p>
 
       <div class="call-panel__actions" id="callActionsOutgoing" hidden>

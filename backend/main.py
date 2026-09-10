@@ -100,6 +100,15 @@ def _add_missing_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN avatar_path VARCHAR"))
 
+    # video calling: same trick for calls.call_type. Every existing call row
+    # predates video calling, so it's backfilled to 'audio' — exactly what
+    # every one of those calls actually was.
+    call_columns = {col["name"] for col in inspector.get_columns("calls")}
+    if "call_type" not in call_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE calls ADD COLUMN call_type VARCHAR"))
+            conn.execute(text("UPDATE calls SET call_type = 'audio' WHERE call_type IS NULL"))
+
 
 _add_missing_columns()
 

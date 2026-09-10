@@ -1,5 +1,5 @@
 """
-One-to-one audio call endpoints: create/accept/reject/cancel/hang-up a call,
+One-to-one audio/video call endpoints: create/accept/reject/cancel/hang-up a call,
 poll its state, and relay WebRTC signaling messages (SDP offer/answer, ICE
 candidates). REST/polling only for now — GET /calls/{call_id} is deliberately
 shaped as "current state + everything new since after_signal_id" in one
@@ -96,7 +96,7 @@ def create_call(
     if receiver_id is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This conversation has no one else to call")
 
-    call = call_service.create_call(db, current_user.id, receiver_id, payload.conversation_id)
+    call = call_service.create_call(db, current_user.id, receiver_id, payload.conversation_id, payload.call_type)
     return CallResponse(success=True, call=call_service.to_call_out(call))
 
 

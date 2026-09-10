@@ -166,7 +166,7 @@ class MessageFile(Base):
 
 class Call(Base):
     """
-    One 1:1 audio call attempt. Always scoped to a direct conversation —
+    One 1:1 audio or video call attempt. Always scoped to a direct conversation —
     receiver_id is never taken from the client, it's derived server-side from
     that conversation's OTHER member (see services/call_service.py), the same
     "never trust a caller-supplied target id" rule every other endpoint here
@@ -185,6 +185,14 @@ class Call(Base):
     No ORM relationship back from Conversation/User on purpose — a call isn't
     part of a conversation's message history and doesn't belong on a User the
     way, say, Message.sender does.
+
+    call_type is "audio" or "video" (see schemas.CALL_TYPES), fixed once at
+    creation time from whichever button the caller used and never changed
+    after. It reflects the CALLER's side only — if the receiver's own camera
+    then fails to acquire, they still negotiate audio-only media over the
+    same call_type="video" row (see calls.js's downgrade handling) rather
+    than flipping this back to "audio". Defaults to "audio" so every call row
+    that predates this column reads as exactly what it always was.
     """
 
     __tablename__ = "calls"
@@ -194,6 +202,7 @@ class Call(Base):
     caller_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     status = Column(String, nullable=False, default="ringing", index=True)
+    call_type = Column(String, nullable=False, default="audio")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)

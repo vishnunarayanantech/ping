@@ -88,7 +88,12 @@ const Chat = (function ($) {
     // other module's open()" pattern startForward uses for the forward button.
     $('#callBtn').on('click', function () {
       if (!state.conversationId) return;
-      Calls.startCall(state.conversationId, state.otherUser);
+      Calls.startCall(state.conversationId, state.otherUser, 'audio');
+    });
+
+    $('#videoCallBtn').on('click', function () {
+      if (!state.conversationId) return;
+      Calls.startCall(state.conversationId, state.otherUser, 'video');
     });
 
     // Same close button drives both the reply preview and the edit preview
