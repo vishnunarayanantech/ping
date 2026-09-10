@@ -1253,6 +1253,10 @@ p {
   color: var(--color-text-primary);
 }
 
+.chat-header__call-btn {
+  margin-left: auto;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -2179,6 +2183,180 @@ p {
 .lightbox__close:hover {
   background: rgba(255, 255, 255, 0.22);
   color: #fff;
+}
+
+/* 11c. Audio calling — one reusable overlay for every call state (see
+   calls.js's render()). Sits above every other overlay (modal/lightbox both
+   use z-index 900-950) since an incoming call is the most time-sensitive
+   thing that can happen while using the app. */
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-lg);
+  background: rgba(13, 14, 20, 0.6);
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.call-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  max-width: 300px;
+  padding: var(--space-2xl) var(--space-lg) var(--space-xl);
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  text-align: center;
+}
+
+.call-panel .avatar {
+  margin-bottom: var(--space-sm);
+}
+
+.call-overlay[data-call-phase='calling'] .call-panel .avatar,
+.call-overlay[data-call-phase='incoming'] .call-panel .avatar {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.call-panel__name {
+  font-size: 1.125rem;
+}
+
+.call-panel__status {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.call-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  margin-top: var(--space-xl);
+}
+
+.call-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  box-shadow: var(--shadow-sm);
+  transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+}
+
+.call-btn:active {
+  transform: scale(0.96);
+}
+
+.call-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+.call-btn--accept {
+  background: var(--color-success);
+  color: #fff;
+}
+
+.call-btn--accept:hover {
+  background: #178f5e;
+}
+
+.call-btn--end {
+  background: var(--color-error);
+  color: #fff;
+}
+
+.call-btn--end:hover {
+  background: #c93d41;
+}
+
+.call-btn--mute {
+  background: var(--color-surface-alt);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.call-btn--mute:hover {
+  background: var(--color-surface-hover);
+}
+
+.call-btn--mute.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  border-color: transparent;
+}
+
+/* Compact "you're on a call" bar — shown instead of .call-overlay once a
+   call is connecting/connected (see calls.js's renderActiveBar()), so the
+   chat underneath stays fully clickable/typeable. Fixed at the very top of
+   the viewport rather than nested inside the chat pane, so it keeps showing
+   even if the user switches conversations or closes the chat entirely —
+   the call itself doesn't care which chat view happens to be open. */
+.active-call-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 52px;
+  padding: 0 var(--space-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Room for the fixed bar above so it never covers the sidebar/chat header —
+   toggled alongside .active-call-bar's [hidden] state, never on its own. */
+.app-shell--call-bar {
+  padding-top: 52px;
+}
+
+.active-call-bar__info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.active-call-bar__name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-call-bar__status {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.active-call-bar__mute.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.active-call-bar__end {
+  width: 38px;
+  height: 38px;
+}
+
+.active-call-bar__end svg {
+  width: 17px;
+  height: 17px;
 }
 
 /* 12. Profile page ------------------------------------------------------------------------ */

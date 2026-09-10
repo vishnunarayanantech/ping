@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from database import Base, engine
-from routers import auth, conversations, messages, users
+from routers import auth, calls, conversations, messages, users
 
 # Every router is imported above (and each imports its models, directly or
 # transitively) BEFORE create_all() runs, so every table — including new
@@ -162,6 +162,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(conversations.router, prefix="/api/v1")
 app.include_router(messages.router, prefix="/api/v1")
+app.include_router(calls.router, prefix="/api/v1")
 
 
 @app.get("/")

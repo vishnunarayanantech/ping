@@ -9,6 +9,30 @@
 </head>
 <body data-page-title="PING">
 
+  <!-- Persistent "you're on a call" bar — shown only once a call is actually
+       connecting/connected (see calls.js's render()). Deliberately NOT part
+       of #callOverlay's full-screen backdrop: once a call is under way, the
+       task requires the chat (message list AND composer) to stay fully
+       usable underneath/around it, unlike the ringing/incoming states below
+       which DO block interaction like a normal modal. Fixed at the very top
+       so it survives switching conversations or closing the chat entirely
+       (the call keeps running independent of whatever chat view is open) —
+       #appShell gets padding-top added (app-shell--call-bar) whenever this
+       is visible so it never covers the sidebar/chat header underneath. -->
+  <div class="active-call-bar" id="activeCallBar" hidden>
+    <span class="avatar avatar--sm" id="activeCallBarAvatar"></span>
+    <span class="active-call-bar__info">
+      <span class="active-call-bar__name" id="activeCallBarName"></span>
+      <span class="active-call-bar__status" id="activeCallBarStatus"></span>
+    </span>
+    <button type="button" class="icon-btn active-call-bar__mute" id="activeCallMuteBtn" aria-label="Mute microphone" title="Mute">
+      <i data-lucide="mic" aria-hidden="true"></i>
+    </button>
+    <button type="button" class="call-btn call-btn--end active-call-bar__end" id="activeCallEndBtn" aria-label="End call" title="End call">
+      <i data-lucide="phone-off" aria-hidden="true"></i>
+    </button>
+  </div>
+
   <div class="app-shell" id="appShell">
 
     <!-- Sidebar: search + current user -->
@@ -73,6 +97,9 @@
           </button>
           <span class="avatar avatar--sm" id="chatHeaderInitials"></span>
           <span class="chat-header__name" id="chatHeaderName"></span>
+          <button type="button" class="icon-btn chat-header__call-btn" id="callBtn" aria-label="Start audio call" title="Audio call">
+            <i data-lucide="phone" aria-hidden="true"></i>
+          </button>
         </header>
 
         <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
@@ -153,6 +180,48 @@
     <img class="lightbox__image" id="imageLightboxImg" alt="">
   </div>
 
+  <!-- Audio call overlay: the full-screen, blocking panel for the states
+       that need a decision or are just a brief notice — outgoing (calling),
+       incoming, and the transient declined/missed/busy/failed/ended
+       messages (see calls.js's render()/STATUS_TEXT). Modeled on the SAME
+       overlay/modal architecture as the forward-message modal and image
+       lightbox above.
+
+       Deliberately does NOT cover the "connecting"/"connected" states —
+       once a call is actually under way, #activeCallBar (above, outside
+       #appShell) takes over instead, precisely so the chat stays usable
+       while a call is in progress (task requirement: send a message while
+       a call is active). Only one of the two is ever visible at a time. -->
+  <div class="call-overlay" id="callOverlay" hidden>
+    <div class="call-panel">
+      <span class="avatar avatar--lg" id="callAvatar"></span>
+      <h2 class="call-panel__name" id="callName"></h2>
+      <p class="call-panel__status" id="callStatusText">Calling…</p>
+
+      <div class="call-panel__actions" id="callActionsOutgoing" hidden>
+        <button type="button" class="call-btn call-btn--end" id="callCancelBtn" aria-label="Cancel call" title="Cancel">
+          <i data-lucide="phone-off" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div class="call-panel__actions" id="callActionsIncoming" hidden>
+        <button type="button" class="call-btn call-btn--end" id="callRejectBtn" aria-label="Reject call" title="Reject">
+          <i data-lucide="phone-off" aria-hidden="true"></i>
+        </button>
+        <button type="button" class="call-btn call-btn--accept" id="callAcceptBtn" aria-label="Accept call" title="Accept">
+          <i data-lucide="phone" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Remote-only audio (see calls.js's docstring on why local mic audio is
+       never attached to any <audio> element — that would be feedback). Kept
+       outside both call UIs above since it has no visual presence of its
+       own and must keep playing regardless of which one (if either) is
+       currently shown. -->
+  <audio id="callRemoteAudio" autoplay></audio>
+
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
@@ -166,6 +235,7 @@
   <script src="../assets/js/forward.js"></script>
   <script src="../assets/js/upload.js"></script>
   <script src="../assets/js/media.js"></script>
+  <script src="../assets/js/calls.js"></script>
   <script src="../assets/js/chat.js"></script>
   <script src="../assets/js/dashboard.js"></script>
 </body>

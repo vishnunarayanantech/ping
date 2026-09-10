@@ -81,6 +81,16 @@ const Chat = (function ($) {
 
     $('#chatBackBtn').on('click', closeConversation);
 
+    // The chat header's own DOM (see main.js-style ownership elsewhere in
+    // this file) — calls.js owns everything about the call itself (state
+    // machine, WebRTC, the call overlay), this just tells it which
+    // conversation/person to call, same "chat.js owns the button, calls the
+    // other module's open()" pattern startForward uses for the forward button.
+    $('#callBtn').on('click', function () {
+      if (!state.conversationId) return;
+      Calls.startCall(state.conversationId, state.otherUser);
+    });
+
     // Same close button drives both the reply preview and the edit preview
     // (they're the same bar — see renderReplyPreview) — whichever one is
     // actually active is what Escape/this click cancels.
@@ -219,6 +229,14 @@ const Chat = (function ($) {
    * know which conversation a file picked from the composer belongs to. */
   function getConversationId() {
     return state.conversationId;
+  }
+
+  /** The other participant of the conversation currently open, or null —
+   * calls.js needs this (avatar/name) to start an outgoing call from the
+   * chat header's call button. Same "just a getter, not owned here" role as
+   * getConversationId above. */
+  function getOtherUser() {
+    return state.otherUser;
   }
 
   /** Set the message the composer is replying to and show its preview above
@@ -1131,6 +1149,7 @@ const Chat = (function ($) {
     handleForwarded: handleForwarded,
     handleFileUploaded: handleFileUploaded,
     getConversationId: getConversationId,
+    getOtherUser: getOtherUser,
     stopPolling: stopPolling
   };
 })(jQuery);

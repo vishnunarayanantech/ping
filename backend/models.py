@@ -162,3 +162,68 @@ class MessageFile(Base):
     mime_type = Column(String, nullable=False)
     file_size = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Call(Base):
+    """
+    One 1:1 audio call attempt. Always scoped to a direct conversation —
+    receiver_id is never taken from the client, it's derived server-side from
+    that conversation's OTHER member (see services/call_service.py), the same
+    "never trust a caller-supplied target id" rule every other endpoint here
+    follows.
+
+    status is the whole state machine: "ringing" (just created, either party
+    can still act on it) -> exactly one of "accepted" (see answered_at),
+    "rejected", "cancelled", or "missed" (services/call_service.apply_ring_timeout
+    lazily flips a stale "ringing" call to this on read — no scheduler needed).
+    An "accepted" call ends in "ended". "busy" is a terminal status set at
+    creation time when the caller or receiver was already on another active
+    call — that row is finalized immediately (ended_at set) rather than ever
+    being "ringing", so it never rings the would-be receiver and never shows
+    up in their incoming-call poll (see get_active_call_for_user).
+
+    No ORM relationship back from Conversation/User on purpose — a call isn't
+    part of a conversation's message history and doesn't belong on a User the
+    way, say, Message.sender does.
+    """
+
+    __tablename__ = "calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False, index=True)
+    caller_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String, nullable=False, default="ringing", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    answered_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Read-only convenience relationships (no cascade, no back_populates) so
+    # services/call_service.to_call_out can build the CallOut's nested
+    # caller/receiver UserOut straight from the row without a second query.
+    caller = relationship("User", foreign_keys=[caller_id])
+    receiver = relationship("User", foreign_keys=[receiver_id])
+
+
+class CallSignal(Base):
+    """
+    One WebRTC signaling message (SDP offer/answer or an ICE candidate)
+    exchanged during a call. payload is the signaling data as a JSON string
+    (never parsed/interpreted server-side — this is a dumb relay, same
+    "backend never touches the media" boundary as the rest of the calling
+    feature) — schemas.CallSignalOut parses it back to a dict on the way out.
+
+    No `to_user_id` column: every call is exactly two participants, so "every
+    signal not sent by me" (services/call_service.get_new_signals filters on
+    sender_id != current_user.id) is already an unambiguous "for me" — this
+    would need a real recipient column the day group calls exist.
+    """
+
+    __tablename__ = "call_signaling"
+
+    id = Column(Integer, primary_key=True, index=True)
+    call_id = Column(Integer, ForeignKey("calls.id"), nullable=False, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    message_type = Column(String, nullable=False)
+    payload = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

@@ -3,11 +3,13 @@
 Internal company communication platform — a lightweight alternative to Microsoft Teams.
 
 Current foundation: registration, login, user search, one-to-one direct messaging, emoji
-message reactions, replying to a specific message, and a recent-conversations sidebar, all
-end to end and backed by a real
+message reactions, replying to a specific message, forwarding, file sharing with inline media
+previews, message editing, and one-to-one **audio calling** over WebRTC (see "Audio calling"
+below), all end to end and backed by a real
 `conversations` / `conversation_members` schema (not just `sender_id`/`receiver_id` pairs —
-see "Data model" below). No WebSockets yet — the open conversation polls the REST API every
-5s. Group chats, channels, and real-time transport come in later iterations.
+see "Data model" below). No WebSockets yet — the open conversation, sidebar, and an active
+call all poll the REST API. Group chats, channels, video calling, and real-time transport
+come in later iterations.
 
 ## Architecture
 
@@ -38,7 +40,8 @@ PING/
 │   ├── main.py              FastAPI app, CORS, error handlers, router wiring
 │   ├── database.py          SQLAlchemy engine/session (SQLite by default)
 │   ├── config.py            Upload dir / max size / blocked extensions (env-configurable)
-│   ├── models.py            User, Conversation, ConversationMember, Message, MessageReaction, MessageFile tables
+│   ├── models.py            User, Conversation, ConversationMember, Message, MessageReaction,
+│   │                         MessageFile, Call, CallSignal tables
 │   ├── schemas.py           Pydantic request/response models
 │   ├── security.py          Password hashing + JWT create/verify + get_current_user
 │   ├── uploads/              Uploaded files (gitignored) — see config.py's UPLOAD_DIR
@@ -46,16 +49,21 @@ PING/
 │   │   ├── conversation_service.py  get-or-create direct conversation, sidebar query
 │   │   ├── reaction_service.py      add/remove a reaction, aggregate reactions per message
 │   │   ├── reply_service.py         validate a reply's target, batch-fetch quoted-preview info
-│   │   └── file_service.py          validate/stream-save an upload, build its message + row
+│   │   ├── file_service.py          validate/stream-save an upload, build its message + row
+│   │   └── call_service.py         create/accept/reject/cancel/hang-up a call, busy + lazy
+│   │                                ring-timeout enforcement, signaling-message storage
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── routers/
 │       ├── auth.py          POST /api/v1/auth/register, /login
 │       ├── users.py         GET  /api/v1/users/search?q=
 │       ├── conversations.py GET /api/v1/conversations, POST /api/v1/conversations/direct/{user_id}
-│       └── messages.py      POST /api/v1/messages, GET /api/v1/messages/conversation/{id},
-│                             POST/DELETE /api/v1/messages/{id}/reactions[/{emoji}],
-│                             POST /api/v1/messages/upload, GET /api/v1/messages/files/{id}/download
+│       ├── messages.py      POST /api/v1/messages, GET /api/v1/messages/conversation/{id},
+│       │                     POST/DELETE /api/v1/messages/{id}/reactions[/{emoji}],
+│       │                     POST /api/v1/messages/upload, GET /api/v1/messages/files/{id}/download
+│       └── calls.py         POST /api/v1/calls, GET /api/v1/calls/active, GET /api/v1/calls/{id},
+│                             POST /api/v1/calls/{id}/{accept,reject,cancel,hangup,signals},
+│                             GET /api/v1/calls/ice-servers — see "Audio calling" below
 │
 ├── frontend/
 │   ├── index.html           Routes to dashboard or login based on session
@@ -80,7 +88,9 @@ PING/
 │       │   ├── chat.js      Open conversation: message rendering, send, polling, reply-to-message UI
 │       │   ├── upload.js    Composer's attach-file button: picker, progress bar, POST /messages/upload
 │       │   ├── media.js     Blob-URL cache + fetch for inline image/video/audio previews, image lightbox
-│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat + Upload + Media together
+│       │   ├── calls.js     Call state machine + WebRTC (RTCPeerConnection) + the call overlay/bar —
+│       │   │                 see "Audio calling" below
+│       │   └── dashboard.js Wires auth guard + Conversations + Users + Chat + Upload + Media + Calls together
 │       └── images/logo.svg
 │
 ├── .gitignore
@@ -159,8 +169,17 @@ Base path: `/api/v1`
 | DELETE | `/messages/{message_id}/reactions/{emoji}` | JWT | —                                 |
 | POST   | `/messages/upload`                      | JWT  | multipart form: `conversation_id`, `file` (creates a file-share message) |
 | GET    | `/messages/files/{file_id}/download`    | JWT  | — (streams the file; caller must belong to its message's conversation) |
+| GET    | `/calls/ice-servers`                    | JWT  | — (STUN/TURN config for `RTCPeerConnection` — see "Audio calling") |
+| GET    | `/calls/active`                         | JWT  | — (the caller's current ringing/accepted call, or `null`) |
+| POST   | `/calls`                                | JWT  | `{ conversation_id }` (receiver is derived from the OTHER member — never client-supplied; returns a `"busy"` call instead of erroring if either side is already on one) |
+| GET    | `/calls/{call_id}?after_signal_id=`     | JWT  | — (current call state + every signaling message from the OTHER participant since `after_signal_id`, in one response) |
+| POST   | `/calls/{call_id}/signals`              | JWT  | `{ message_type, payload }` (`message_type` one of `offer`/`answer`/`ice-candidate`; `payload` relayed opaque, never parsed) |
+| POST   | `/calls/{call_id}/accept`               | JWT  | — (receiver only) |
+| POST   | `/calls/{call_id}/reject`               | JWT  | — (receiver only) |
+| POST   | `/calls/{call_id}/cancel`               | JWT  | — (caller only, before it's answered) |
+| POST   | `/calls/{call_id}/hangup`               | JWT  | — (either participant, once accepted) |
 
-Every response uses the same envelope shape: `{ "success": bool, "message"|"messages"|"users"|"conversations"|"conversation"|"reactions": ... }`.
+Every response uses the same envelope shape: `{ "success": bool, "message"|"messages"|"users"|"conversations"|"conversation"|"reactions"|"call"|"signals"|"ice_servers": ... }`.
 Errors are always `{ "success": false, "message": "..." }` with an appropriate status code
 (401 unauthenticated/invalid credentials, 403 not a conversation member, 404 not found,
 409 duplicate email, 422 validation, 500 unhandled). Password hashes are never included in
@@ -250,6 +269,12 @@ members live in `conversation_members`, not on the message itself. This replaced
   card if that fetch fails OR the browser's own `<img>`/`<video>`/`<audio>` `error` event fires
   (bytes fetched fine but couldn't actually be decoded as that media type) — the latter is what
   makes an unsupported/corrupt file degrade gracefully instead of showing a broken player.
+- **Calls**: `calls` and `call_signaling` are both brand-new tables (see "Audio calling" below
+  for the full design) — `create_all()` created them on top of an existing `ping.db` with no
+  migration step, same as `message_files` did. `calls.receiver_id` is never taken from the
+  client; it's always derived server-side from the calling conversation's other member
+  (`call_service.get_other_member_id`), the same "sender is always the verified token, never
+  the request body" rule every other write endpoint in this API follows.
 
 ### Schema history
 
@@ -292,8 +317,8 @@ above), so it required zero migration and works retroactively on files uploaded 
 
 ## Real-time strategy
 
-No WebSockets yet, by design. Two independent polls, each on its own `setInterval`, never
-more than one instance of either at a time:
+No WebSockets yet, by design. Three independent pollers, each owning exactly one timer at a
+time (never more than one in flight per poller):
 
 - **`chat.js`** — while a conversation is open, re-fetches and fully *replaces* its message
   list every 5 seconds (`Chat.startPolling()` / `stopPolling()`) — replacing rather than
@@ -309,11 +334,68 @@ more than one instance of either at a time:
   fetches overlap. If a poll ever finds unread messages on the conversation the user is
   actively viewing (a brief race with `chat.js`'s own timer), it clears that badge immediately
   and fires the read confirmation itself rather than flashing it.
+- **`calls.js`** — one **adaptive** timer rather than a fixed interval: `CALL_POLL_INTERVAL_IDLE_MS`
+  (`config.js`, same value as `CONVERSATION_POLL_INTERVAL`) while idle, just to notice an
+  incoming call via `GET /calls/active`; the moment a call exists, it switches to
+  `CALL_POLL_INTERVAL_ACTIVE_MS` (1.5s) against `GET /calls/{id}` for fast SDP/ICE signaling
+  exchange, and drops back to idle speed the instant the call ends. This is what keeps calling
+  from adding a second always-on poll loop alongside the two above — see "Audio calling" below.
 
-Both are written as plain functions (`handleNewMessage`-shaped: fetch, then hand the result to
-a render/update function) rather than anything poll-specific, so `startPolling()`/
-`stopPolling()` in each file are the intended seam for a future WebSocket connection to plug
-into — replacing the timer, not the handlers.
+All three are written as plain functions (`handleNewMessage`-shaped: fetch, then hand the
+result to a render/update function) rather than anything poll-specific, so `startPolling()`/
+`stopPolling()` (or, for `calls.js`, `scheduleNextPoll()`) in each file are the intended seam
+for a future WebSocket connection to plug into — replacing the timer, not the handlers.
+
+## Audio calling
+
+One-to-one audio calling over WebRTC, with the existing REST/JWT API used only for call
+state and WebRTC signaling — never for the audio itself.
+
+- **Signaling, not media, over REST.** `RTCPeerConnection` handles microphone capture and the
+  actual peer-to-peer audio stream; the backend only ever relays small JSON blobs (SDP offers/
+  answers, ICE candidates) it never inspects (`models.CallSignal.payload` is an opaque JSON
+  string) — see `routers/calls.py`'s module docstring. `GET /calls/{id}?after_signal_id=` comes
+  back with the call's current status **and** every new signal from the other participant in
+  one response, deliberately shaped like a single future WebSocket "call:update" event would be
+  — swapping the transport later only touches `calls.js`'s polling functions
+  (`scheduleNextPoll`/`pollTick`/`sendSignal`), never `createPeerConnection`/`handleSignal`/the
+  overlay itself.
+- **State machine**: `calling` → `ringing`/`incoming` → `accepted` → `ended`, or terminated
+  early by `rejected`/`cancelled`/`missed`/`busy` (`models.Call.status`, enforced server-side in
+  `services/call_service.py` and `routers/calls.py` — a client's own UI state is never trusted
+  for a transition). `busy` is set at creation time, not reached via a transition: if either
+  the caller or receiver already has a `ringing`/`accepted` call, the new row is created already
+  `busy` and finalized, so it never rings the would-be receiver and never appears in their
+  `GET /calls/active` poll.
+- **Missed-call timeout with no scheduler.** `CALL_RING_TIMEOUT_SECONDS` (`backend/config.py`,
+  default 30s) is enforced lazily: `call_service.apply_ring_timeout` checks a `ringing` call's
+  age on every read (`GET /calls/active`, `GET /calls/{id}`) and every state-changing action,
+  flipping it to `missed` the first time it's read past that age. Idempotent, so a client
+  polling every 1.5s only ever sees the transition once — never a repeated missed-call
+  notification for the same call.
+- **One reusable call UI, two presentations.** `calls.js` drives a single state machine, but
+  renders it two ways: `#callOverlay` is a full-screen, blocking panel (same overlay/modal
+  pattern as the forward-message modal and image lightbox) for the `calling`/`incoming`
+  states and the brief `ended`-phase result notices (declined/missed/busy/failed/ended);
+  `#activeCallBar`, a slim fixed bar at the very top of the page, takes over instead once a
+  call reaches `connecting`/`connected`. That split exists specifically so the chat — message
+  list *and* composer — stays fully usable while a call is actually in progress, per the task
+  requirement that sending a message must keep working during an active call; only the
+  ringing/incoming decision states are meant to block interaction. `#activeCallBar` lives
+  outside `#appShell` (with `.app-shell--call-bar` adding matching `padding-top` so it never
+  covers the sidebar/chat header) so it keeps showing even if the user switches conversations
+  or closes the chat entirely — the call itself doesn't care which chat view happens to be open.
+- **ICE/STUN/TURN is backend-configured, not hardcoded in the frontend.** `GET /calls/ice-servers`
+  returns `backend/config.py`'s `get_ice_servers()` output (`ICE_STUN_URLS`, plus an optional
+  single TURN server via `TURN_URL`/`TURN_USERNAME`/`TURN_CREDENTIAL`) — `calls.js` fetches it
+  once per session and falls back to a hardcoded public STUN default only if that request
+  itself fails. Adding a TURN server later (needed for NAT/firewall combinations STUN alone
+  can't traverse) is purely an env-var change, no code changes on either side.
+- **Resource cleanup.** `cleanupRtc()` stops every local `MediaStream` track and closes the
+  `RTCPeerConnection` on every path out of a call (hangup, reject, cancel, missed, busy, ICE
+  failure, a client-side connect timeout) — `resetToIdle()` always calls it before handing
+  control back to the idle poller, so a user can start a new call immediately after any way the
+  previous one could have ended.
 
 ## Sidebar edge case: conversations with no messages
 
@@ -365,3 +447,13 @@ the real deployed frontend origin — before shipping to production. Never set
   render (and is treated as such, falling back to the plain file card) rather than doing
   anything unsafe. `image/svg+xml` is excluded from preview outright since SVG can embed
   `<script>`, even though `<img>` already refuses to execute it.
+- Calls follow the same access-control posture as everything else: `POST /calls` requires
+  conversation membership and derives the receiver server-side (never from the request body);
+  every other call endpoint requires being that specific call's caller or receiver
+  (`routers/calls.py`'s `_require_participant`) and returns `403` otherwise — a call id alone
+  never grants access, and a third party can't read or inject signaling messages for a call
+  they're not on. Every state-changing endpoint (`accept`/`reject`/`cancel`/`hangup`) also
+  independently re-checks that the call is still in a state where that transition is legal
+  (e.g. `accept` on an already-`missed` call is rejected with `409`), not just who's calling it —
+  the frontend's own state is never trusted for this. Busy and the ring timeout are both
+  enforced server-side (see "Audio calling" above), not merely assumed from the client.

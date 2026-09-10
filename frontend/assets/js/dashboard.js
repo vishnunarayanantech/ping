@@ -23,6 +23,7 @@ $(function () {
   Forward.init();
   Upload.init();
   Media.init();
+  Calls.init(user);
 
   // Both the recent-conversations list and user search ultimately just need
   // to open a conversation — they share this one callback.
@@ -40,6 +41,7 @@ $(function () {
   $('#logoutBtn').on('click', function () {
     Chat.stopPolling();
     Conversations.stopPolling();
+    Calls.stopPolling();
     Ping.clearSession();
     window.location.href = '../auth/login.html';
   });

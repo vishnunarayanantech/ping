@@ -25,3 +25,22 @@ const MAX_UPLOAD_SIZE_MB = 25;
 // Mirrors backend/config.py's MAX_AVATAR_SIZE_MB default — same "just a
 // pre-flight check" caveat as MAX_UPLOAD_SIZE_MB above.
 const MAX_AVATAR_SIZE_MB = 5;
+
+// Audio calling (see calls.js). Two speeds for the SAME single poll timer,
+// not two separate timers: while idle, checking for an incoming call only
+// needs to be as fresh as the sidebar's own poll; once a call is actually
+// ringing/connecting, SDP/ICE signaling needs to move much faster than a
+// 5s tick would allow, or call setup feels broken.
+const CALL_POLL_INTERVAL_IDLE_MS = CONVERSATION_POLL_INTERVAL;
+const CALL_POLL_INTERVAL_ACTIVE_MS = 1500;
+
+// A stuck ICE negotiation (e.g. a NAT neither side's STUN can traverse, with
+// no TURN server configured yet — see backend/config.py's TURN_* env vars)
+// would otherwise leave the UI in "Connecting…" forever. Client-side only;
+// backend/config.py's CALL_RING_TIMEOUT_SECONDS is the server-enforced
+// equivalent for the earlier "ringing, nobody answered" phase.
+const CALL_CONNECT_TIMEOUT_MS = 20000;
+
+// Used only if GET /calls/ice-servers can't be reached — backend/config.py's
+// ICE_STUN_URLS/TURN_* env vars are the real source of truth.
+const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];

@@ -51,3 +51,34 @@ MAX_AVATAR_SIZE_BYTES = int(MAX_AVATAR_SIZE_MB * 1024 * 1024)
 AVATAR_MAX_DIMENSION = int(os.getenv("AVATAR_MAX_DIMENSION", "512"))
 
 os.makedirs(AVATAR_DIR, exist_ok=True)
+
+# --- Audio calling ------------------------------------------------------
+# How long an outgoing call is allowed to sit in "ringing" before
+# services/call_service.apply_ring_timeout lazily flips it to "missed".
+# Enforced server-side on every read of a call (never trusted from the
+# frontend) so a caller can't be left staring at "Calling..." forever just
+# because their own tab's timer got throttled or closed.
+CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "30"))
+
+# STUN servers offered to the frontend's RTCPeerConnection — comma-separated,
+# e.g. "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302". STUN
+# alone doesn't guarantee connectivity across every NAT/firewall; a TURN
+# relay can be added later purely via the TURN_* env vars below, with zero
+# code changes to the frontend or to routers/calls.py.
+ICE_STUN_URLS = os.getenv("ICE_STUN_URLS", "stun:stun.l.google.com:19302")
+
+# Optional single TURN server. All three must be set for it to be included
+# (a TURN server with no credentials isn't usable) — see get_ice_servers().
+TURN_URL = os.getenv("TURN_URL", "")
+TURN_USERNAME = os.getenv("TURN_USERNAME", "")
+TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL", "")
+
+
+def get_ice_servers():
+    """RTCPeerConnection-ready iceServers list — see routers/calls.py's
+    GET /calls/ice-servers, the frontend's single source of truth for this
+    (calls.js never hardcodes a STUN/TURN URL itself)."""
+    servers = [{"urls": url.strip()} for url in ICE_STUN_URLS.split(",") if url.strip()]
+    if TURN_URL and TURN_USERNAME and TURN_CREDENTIAL:
+        servers.append({"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_CREDENTIAL})
+    return servers

@@ -1,6 +1,7 @@
 import hashlib
+import json
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, EmailStr, Field, computed_field, field_validator
 
@@ -397,3 +398,120 @@ class ConversationListResponse(BaseModel):
 class MarkReadResponse(BaseModel):
     success: bool
     message: str
+
+
+# --- Audio calling --------------------------------------------------------
+
+class CallCreate(BaseModel):
+    """POST /calls body. Deliberately has no receiver_id field — the callee
+    is always derived server-side from the conversation's OTHER member (see
+    routers/calls.py), never taken from the client, same reasoning as
+    ProfileUpdate/MessageUpdate's docstrings for why their schemas omit
+    fields that would let a request body name a different target."""
+
+    conversation_id: int
+
+
+class CallOut(BaseModel):
+    id: int
+    conversation_id: int
+    status: str
+    caller: UserOut
+    receiver: UserOut
+    created_at: datetime
+    answered_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_utc(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+    @field_validator("answered_at", "ended_at")
+    @classmethod
+    def _optional_utc(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _ensure_utc(value) if value is not None else None
+
+    class Config:
+        from_attributes = True
+
+
+class CallResponse(BaseModel):
+    success: bool
+    call: CallOut
+
+
+class CallActiveResponse(BaseModel):
+    """GET /calls/active — call is None when the caller has no ringing/
+    accepted call to resume or answer right now."""
+
+    success: bool
+    call: Optional[CallOut] = None
+
+
+# The only three WebRTC signaling message shapes this feature ever relays —
+# restricting the backend to this set is the same "don't let a direct API
+# call smuggle arbitrary content through" reasoning as
+# schemas.ALLOWED_REACTION_EMOJIS.
+CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate"}
+
+
+class CallSignalCreate(BaseModel):
+    """POST /calls/{call_id}/signals body. `payload` is passed through to the
+    other participant completely opaque to the backend (it's SDP/ICE data
+    meant for the browser's WebRTC stack, never interpreted server-side) —
+    see models.CallSignal's docstring."""
+
+    message_type: str
+    payload: Dict[str, Any]
+
+    @field_validator("message_type")
+    @classmethod
+    def _valid_message_type(cls, value: str) -> str:
+        if value not in CALL_SIGNAL_TYPES:
+            raise ValueError("Unsupported signal type")
+        return value
+
+
+class CallSignalOut(BaseModel):
+    id: int
+    sender_id: int
+    message_type: str
+    payload: Dict[str, Any]
+    created_at: datetime
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _parse_payload(cls, value):
+        # ORM rows store payload as a JSON string (models.CallSignal.payload
+        # is a Text column) — parse it back to a dict here so this schema can
+        # validate straight off the row via from_attributes, same as every
+        # other *Out schema in this file.
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_utc(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+    class Config:
+        from_attributes = True
+
+
+class CallStateResponse(BaseModel):
+    """GET /calls/{call_id} — the call's current status plus any signaling
+    messages from the OTHER participant the caller hasn't seen yet (see
+    services/call_service.get_new_signals). One poll response carries both,
+    which is deliberately shaped like a single WebSocket "call update" event
+    would be — see routers/calls.py's module docstring for why."""
+
+    success: bool
+    call: CallOut
+    signals: List[CallSignalOut] = Field(default_factory=list)
+
+
+class IceServersResponse(BaseModel):
+    success: bool
+    ice_servers: List[Dict[str, str]]

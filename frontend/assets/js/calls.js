@@ -1,0 +1,751 @@
+/**
+ * One-to-one audio calling: the call state machine, the WebRTC peer
+ * connection, and the single reusable call overlay (outgoing/incoming/
+ * connecting/connected, plus the brief declined/missed/busy/failed/ended
+ * states — see render()). Self-contained, like forward.js/media.js — owns
+ * #callOverlay's DOM entirely; chat.js just calls Calls.startCall() from its
+ * header's call button and otherwise knows nothing about calling.
+ *
+ * Signaling (SDP offers/answers, ICE candidates) travels over the same
+ * REST/JWT API as everything else in this app — see backend/routers/calls.py
+ * — polled on ONE adaptive timer (scheduleNextPoll): a slow, CONVERSATION-
+ * POLL-speed tick while idle just to notice an incoming call, switching to a
+ * fast tick only for the duration of an actual call, so this never adds a
+ * second always-on poll loop alongside Conversations'/Chat's. The instant a
+ * call ends, polling drops back to idle speed. Swapping this transport for a
+ * WebSocket later only means rewriting scheduleNextPoll/pollTick/sendSignal
+ * — everything below that (createPeerConnection, handleSignal, mute, the
+ * overlay itself) is written against plain state + callbacks, not against
+ * "how a message arrives," so none of it would need to change.
+ *
+ * The actual microphone/audio streaming NEVER goes through this API — that's
+ * the whole point of WebRTC here (see RTCPeerConnection below): the backend
+ * only ever relays small JSON blobs it never looks inside.
+ */
+const Calls = (function ($) {
+  'use strict';
+
+  // Messages shown briefly (see endWithReason) before the overlay closes and
+  // the poll loop drops back to idle speed. Keyed by [reason][role] — a
+  // combination with no entry here closes with no message at all (e.g. a
+  // cancel/reject the LOCAL user just triggered themselves, or "cancelled"
+  // on the receiver's side, which per spec just makes the incoming screen
+  // disappear).
+  const TRANSIENT_MESSAGES = {
+    rejected: { caller: 'Call declined' },
+    missed: { caller: 'No answer' },
+    ended: { caller: 'Call ended', receiver: 'Call ended' },
+    failed: { caller: 'Call failed', receiver: 'Call failed' }
+  };
+  const TRANSIENT_DISPLAY_MS = 2200;
+
+  const state = {
+    currentUser: null,
+    iceServers: null,
+    // idle | calling | incoming | connecting | connected | ended
+    // ("ended" is the shared transient display for rejected/cancelled/
+    // missed/busy/failed/ended — see endWithReason/render.)
+    phase: 'idle',
+    endReason: null,
+    callId: null,
+    role: null, // 'caller' | 'receiver'
+    conversationId: null,
+    otherUser: null,
+    pc: null,
+    localStream: null,
+    muted: false,
+    lastSignalId: 0,
+    pendingOffer: null,
+    pendingCandidates: [],
+    // Bumped every time a call is torn down, so a poll response that was
+    // already in flight for the OLD call can never mutate state for
+    // whatever comes next — same "stale response after switching away"
+    // guard chat.js's fetchAndRender uses via its conversationId check.
+    pollGeneration: 0,
+    pollTimer: null,
+    // Separate flags (not one shared "a request is in flight") because
+    // showIncoming() calls pollCallState() synchronously from INSIDE
+    // pollForIncoming()'s own success handler — at that point the idle
+    // poll's flight flag hasn't been cleared yet (its .always() hasn't run),
+    // so a single shared flag would make that nested call think a request
+    // was already running and silently skip fetching the offer.
+    idlePollInFlight: false,
+    activePollInFlight: false,
+    durationTimer: null,
+    callStartedAt: null,
+    connectTimeoutTimer: null,
+    endedDisplayTimer: null
+  };
+
+  // #callOverlay: the full-screen blocking panel — calling/incoming/ended only.
+  let $overlay, $avatar, $name, $statusText, $actionsOutgoing, $actionsIncoming;
+  // #activeCallBar: the compact, non-blocking bar — connecting/connected only.
+  let $appShell, $activeBar, $activeBarAvatar, $activeBarName, $activeBarStatus, $muteBtn, $remoteAudio;
+
+  function init(currentUser) {
+    state.currentUser = currentUser;
+
+    $overlay = $('#callOverlay');
+    $avatar = $('#callAvatar');
+    $name = $('#callName');
+    $statusText = $('#callStatusText');
+    $actionsOutgoing = $('#callActionsOutgoing');
+    $actionsIncoming = $('#callActionsIncoming');
+
+    $appShell = $('#appShell');
+    $activeBar = $('#activeCallBar');
+    $activeBarAvatar = $('#activeCallBarAvatar');
+    $activeBarName = $('#activeCallBarName');
+    $activeBarStatus = $('#activeCallBarStatus');
+    $muteBtn = $('#activeCallMuteBtn');
+    $remoteAudio = $('#callRemoteAudio');
+
+    $('#callCancelBtn').on('click', cancelCall);
+    $('#callRejectBtn').on('click', rejectCall);
+    $('#callAcceptBtn').on('click', acceptCall);
+    $('#activeCallEndBtn').on('click', hangup);
+    $muteBtn.on('click', toggleMute);
+
+    // Fetched once and cached for the session — backend/config.py's
+    // ICE_STUN_URLS/TURN_* env vars are the source of truth; this just
+    // avoids a network round trip on every single call. Falls back to a
+    // public STUN default if the request fails, so a signaling blip doesn't
+    // block calling outright (see config.js's DEFAULT_ICE_SERVERS).
+    Api.request({ url: '/calls/ice-servers' })
+      .done(function (response) {
+        state.iceServers = response.ice_servers;
+      })
+      .fail(function () {
+        state.iceServers = DEFAULT_ICE_SERVERS;
+      });
+
+    scheduleNextPoll();
+  }
+
+  function rtcSupported() {
+    return !!(window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  }
+
+  // --- Polling --------------------------------------------------------
+
+  function scheduleNextPoll() {
+    clearTimeout(state.pollTimer);
+    const delay = state.phase === 'idle' ? CALL_POLL_INTERVAL_IDLE_MS : CALL_POLL_INTERVAL_ACTIVE_MS;
+    state.pollTimer = setTimeout(pollTick, delay);
+  }
+
+  function pollTick() {
+    if (state.phase === 'idle') {
+      pollForIncoming();
+    } else if (state.callId) {
+      pollCallState();
+    } else {
+      scheduleNextPoll();
+    }
+  }
+
+  function pollForIncoming() {
+    if (state.idlePollInFlight) {
+      scheduleNextPoll();
+      return;
+    }
+    state.idlePollInFlight = true;
+
+    Api.request({ url: '/calls/active' })
+      .done(function (response) {
+        if (state.phase !== 'idle') return; // an outgoing call started locally in the meantime
+        if (response.call && response.call.status === 'ringing' && response.call.receiver.id === state.currentUser.id) {
+          showIncoming(response.call);
+          return; // pollCallState takes over at active speed from here
+        }
+        scheduleNextPoll();
+      })
+      .fail(function () {
+        if (state.phase === 'idle') scheduleNextPoll();
+      })
+      .always(function () {
+        state.idlePollInFlight = false;
+      });
+  }
+
+  function pollCallState() {
+    if (state.activePollInFlight) {
+      scheduleNextPoll();
+      return;
+    }
+    state.activePollInFlight = true;
+    const callId = state.callId;
+    const generation = state.pollGeneration;
+
+    Api.request({ url: '/calls/' + callId + '?after_signal_id=' + state.lastSignalId })
+      .done(function (response) {
+        if (generation !== state.pollGeneration) return; // this call was reset/ended locally already
+        handleCallUpdate(response.call, response.signals);
+      })
+      .fail(function (xhr) {
+        if (generation !== state.pollGeneration) return;
+        if (xhr.status === 403 || xhr.status === 404) {
+          endWithReason('failed');
+        }
+        // Any other failure is treated as a transient network blip — the
+        // next tick just tries again, same "silent on poll failures"
+        // posture as chat.js/conversations.js.
+      })
+      .always(function () {
+        state.activePollInFlight = false;
+        if (generation === state.pollGeneration && state.phase !== 'idle') scheduleNextPoll();
+      });
+  }
+
+  function handleCallUpdate(call, signals) {
+    signals.forEach(function (signal) {
+      state.lastSignalId = Math.max(state.lastSignalId, signal.id);
+      handleSignal(signal);
+    });
+
+    switch (call.status) {
+      case 'ringing':
+        break; // nothing new
+      case 'accepted':
+        if (state.phase === 'calling') {
+          state.phase = 'connecting';
+          startConnectTimeout();
+          render();
+          checkIceConnected(); // ICE may have already connected before this transition ran — see its docstring
+        }
+        break;
+      case 'rejected':
+        endWithReason('rejected');
+        break;
+      case 'cancelled':
+        endWithReason('cancelled');
+        break;
+      case 'missed':
+        endWithReason('missed');
+        break;
+      case 'busy':
+        endWithReason('busy');
+        break;
+      case 'ended':
+        endWithReason('ended');
+        break;
+    }
+  }
+
+  // --- Outgoing call ----------------------------------------------------
+
+  /** Called from chat.js's call button. */
+  function startCall(conversationId, otherUser) {
+    if (state.phase === 'ended') {
+      // A brief "Call declined"/"Call ended"/etc. notice (see endWithReason)
+      // is still showing from the PREVIOUS call — e.g. the other side just
+      // hung up and this client's own poll only found out moments ago.
+      // Don't let that lingering notice silently swallow a new call attempt
+      // for the ~2s it would otherwise still be on screen — the user's new
+      // action takes priority, so dismiss it immediately and proceed.
+      resetToIdle();
+    } else if (state.phase !== 'idle') {
+      // Genuinely still on/starting a call (locally, or a poll simply
+      // hasn't yet caught up to the other side having ended it) — give
+      // clear feedback instead of silently doing nothing.
+      Ping.showToast('You are already on a call.', 'error');
+      return;
+    }
+    if (!rtcSupported()) {
+      Ping.showToast('Your browser does not support audio calls.', 'error');
+      return;
+    }
+
+    // Captured once and re-checked after every async step below (mic
+    // prompt, then two network round trips) — resetToIdle() bumps this on
+    // ANY reset (a cancel click, or an unrelated incoming call answered
+    // while this one was still being set up), so a mismatch here always
+    // means "the world moved on, abandon this attempt without touching
+    // whatever state now belongs to" instead of stomping it. Same
+    // conversationId-staleness guard chat.js's fetchAndRender uses, just
+    // keyed off this module's own generation counter since there's no
+    // call id yet for most of this function.
+    const myGeneration = state.pollGeneration;
+
+    state.phase = 'calling';
+    state.role = 'caller';
+    state.conversationId = conversationId;
+    state.otherUser = otherUser;
+    state.lastSignalId = 0;
+    render(); // instant "Calling…" feedback before the mic prompt / network round trips below
+
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then(function (stream) {
+        if (state.pollGeneration !== myGeneration) {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return Promise.reject({ superseded: true });
+        }
+        state.localStream = stream;
+        return Api.request({ url: '/calls', method: 'POST', data: { conversation_id: conversationId } });
+      })
+      .then(function (response) {
+        if (state.pollGeneration !== myGeneration) return Promise.reject({ superseded: true });
+
+        const call = response.call;
+        if (call.status === 'busy') {
+          Ping.showToast('User is currently on another call.', 'error');
+          return Promise.reject({ handled: true });
+        }
+
+        state.callId = call.id;
+        createPeerConnection();
+        addLocalTracks();
+        return state.pc.createOffer();
+      })
+      .then(function (offer) {
+        if (state.pollGeneration !== myGeneration) return Promise.reject({ superseded: true });
+        return state.pc.setLocalDescription(offer);
+      })
+      .then(function () {
+        if (state.pollGeneration !== myGeneration) return Promise.reject({ superseded: true });
+        sendSignal('offer', { sdp: state.pc.localDescription });
+        pollCallState(); // switch to active-speed polling (immediately, not after one idle-speed tick's delay) now that a call exists
+      })
+      .catch(function (err) {
+        if (err && err.superseded) return; // already cleaned up / replaced elsewhere — don't touch shared state
+        if (err && err.handled) {
+          resetToIdle();
+          return;
+        }
+        handleStartupError(err);
+      });
+  }
+
+  function handleStartupError(err) {
+    Ping.showToast(mediaErrorMessage(err), 'error');
+    resetToIdle();
+  }
+
+  function mediaErrorMessage(err) {
+    const name = err && (err.name || (err.responseJSON && 'ApiError'));
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      return 'Microphone permission is required to make an audio call.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'No microphone was found on this device.';
+    }
+    if (err && err.responseJSON && err.responseJSON.message) {
+      return err.responseJSON.message;
+    }
+    return 'Unable to start the call.';
+  }
+
+  // --- Incoming call ------------------------------------------------------
+
+  function showIncoming(call) {
+    state.phase = 'incoming';
+    state.role = 'receiver';
+    state.callId = call.id;
+    state.conversationId = call.conversation_id;
+    state.otherUser = call.caller;
+    state.lastSignalId = 0;
+    render();
+    // Poll immediately rather than merely scheduling one — the offer signal
+    // (sent the moment the caller placed the call, likely already sitting on
+    // the server) needs to be in state.pendingOffer before the user can
+    // accept. Waiting out one full CALL_POLL_INTERVAL_ACTIVE_MS tick first
+    // would let someone accept faster than that and hit acceptCall()'s
+    // "no offer yet" rejection for no real reason.
+    pollCallState();
+  }
+
+  function acceptCall() {
+    if (state.phase !== 'incoming') return;
+    if (!rtcSupported()) {
+      Ping.showToast('Your browser does not support audio calls.', 'error');
+      declineLocally();
+      return;
+    }
+
+    const callId = state.callId;
+    // Same "abandon without touching shared state if superseded" guard
+    // startCall() uses — re-checked after every async step below, since a
+    // reject/hangup/timeout, or even a completely different incoming call,
+    // can land while any of these are still pending.
+    const myGeneration = state.pollGeneration;
+    const stillMine = function () { return state.pollGeneration === myGeneration && state.callId === callId; };
+
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then(function (stream) {
+        if (!stillMine()) {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return Promise.reject({ superseded: true });
+        }
+        state.localStream = stream;
+        createPeerConnection();
+        addLocalTracks();
+        if (!state.pendingOffer) return Promise.reject({ handled: true, message: 'The call ended before it could connect.' });
+        return state.pc.setRemoteDescription(new RTCSessionDescription(state.pendingOffer));
+      })
+      .then(function () {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        return flushPendingCandidates();
+      })
+      .then(function () {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        return state.pc.createAnswer();
+      })
+      .then(function (answer) {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        return state.pc.setLocalDescription(answer);
+      })
+      .then(function () {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        return Api.request({ url: '/calls/' + callId + '/accept', method: 'POST' });
+      })
+      .then(function () {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        sendSignal('answer', { sdp: state.pc.localDescription });
+        state.phase = 'connecting';
+        startConnectTimeout();
+        render();
+        checkIceConnected(); // ICE may have already connected before this transition ran — see its docstring
+      })
+      .catch(function (err) {
+        if (err && err.superseded) return; // already cleaned up / replaced elsewhere — don't touch shared state
+        if (err && err.handled) {
+          if (err.message) Ping.showToast(err.message, 'error');
+          resetToIdle();
+          return;
+        }
+        if (err && err.responseJSON) {
+          Ping.showToast(Ping.getErrorMessage(err, 'This call is no longer available.'), 'error');
+          resetToIdle();
+          return;
+        }
+        handleStartupError(err);
+      });
+  }
+
+  /** Reject without waiting on the backend to confirm mic support/etc. —
+   * used when acceptCall() can't even attempt to proceed. */
+  function declineLocally() {
+    Api.request({ url: '/calls/' + state.callId + '/reject', method: 'POST' });
+    resetToIdle();
+  }
+
+  function rejectCall() {
+    if (state.phase !== 'incoming') return;
+    Api.request({ url: '/calls/' + state.callId + '/reject', method: 'POST' });
+    resetToIdle(); // silent for the person who just rejected — the caller learns via their own poll
+  }
+
+  function cancelCall() {
+    if (state.phase !== 'calling') return;
+    if (state.callId) {
+      Api.request({ url: '/calls/' + state.callId + '/cancel', method: 'POST' });
+    }
+    resetToIdle(); // silent for the caller — receiver's incoming screen just disappears via their poll
+  }
+
+  function hangup() {
+    if (state.phase !== 'connecting' && state.phase !== 'connected') return;
+    if (state.callId) {
+      Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
+    }
+    endWithReason('ended', true); // silent for whoever clicked it; the other side sees "Call ended" via poll
+  }
+
+  // --- WebRTC ---------------------------------------------------------
+
+  function createPeerConnection() {
+    const pc = new RTCPeerConnection({ iceServers: state.iceServers || DEFAULT_ICE_SERVERS });
+
+    pc.onicecandidate = function (e) {
+      if (e.candidate) sendSignal('ice-candidate', { candidate: e.candidate });
+    };
+
+    pc.ontrack = function (e) {
+      $remoteAudio[0].srcObject = e.streams[0];
+    };
+
+    pc.oniceconnectionstatechange = function () {
+      const cs = pc.iceConnectionState;
+      if (cs === 'connected' || cs === 'completed') {
+        checkIceConnected();
+      } else if (cs === 'failed') {
+        if (state.callId) Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
+        endWithReason('failed');
+      }
+    };
+
+    state.pc = pc;
+  }
+
+  /**
+   * Promotes 'connecting' -> 'connected' once ICE actually reports it.
+   * Called both from oniceconnectionstatechange above AND right after
+   * setting state.phase = 'connecting' in acceptCall()/handleCallUpdate() —
+   * on two peers on the same machine/LAN, ICE connectivity checks can finish
+   * (and fire that event) BEFORE this module gets around to setting
+   * state.phase = 'connecting' at all (it happens after createAnswer/
+   * setLocalDescription/the accept POST's round trip) — an event-only check
+   * would miss that already-past transition and leave the UI stuck showing
+   * "Connecting…" forever despite audio already flowing.
+   */
+  function checkIceConnected() {
+    if (!state.pc || state.phase !== 'connecting') return;
+    const cs = state.pc.iceConnectionState;
+    if (cs !== 'connected' && cs !== 'completed') return;
+    clearTimeout(state.connectTimeoutTimer);
+    state.phase = 'connected';
+    state.callStartedAt = Date.now();
+    startDurationTimer();
+    render();
+  }
+
+  function addLocalTracks() {
+    state.localStream.getTracks().forEach(function (track) {
+      state.pc.addTrack(track, state.localStream);
+    });
+  }
+
+  function handleSignal(signal) {
+    if (signal.message_type === 'offer') {
+      state.pendingOffer = signal.payload.sdp;
+      return;
+    }
+
+    if (signal.message_type === 'answer') {
+      if (state.pc && state.role === 'caller') {
+        state.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp)).then(flushPendingCandidates);
+      }
+      return;
+    }
+
+    if (signal.message_type === 'ice-candidate') {
+      if (state.pc && state.pc.remoteDescription && state.pc.remoteDescription.type) {
+        state.pc.addIceCandidate(new RTCIceCandidate(signal.payload.candidate)).catch(function () {
+          // A candidate arriving after the connection already settled (or
+          // one the browser just doesn't like) isn't fatal — WebRTC only
+          // needs enough candidates to find ONE working path.
+        });
+      } else {
+        state.pendingCandidates.push(signal.payload.candidate);
+      }
+    }
+  }
+
+  function flushPendingCandidates() {
+    const candidates = state.pendingCandidates;
+    state.pendingCandidates = [];
+    candidates.forEach(function (candidate) {
+      state.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(function () {});
+    });
+  }
+
+  function sendSignal(messageType, payload) {
+    if (!state.callId) return;
+    Api.request({
+      url: '/calls/' + state.callId + '/signals',
+      method: 'POST',
+      data: { message_type: messageType, payload: payload }
+    });
+  }
+
+  function startConnectTimeout() {
+    clearTimeout(state.connectTimeoutTimer);
+    state.connectTimeoutTimer = setTimeout(function () {
+      if (state.phase === 'connecting') {
+        if (state.callId) Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
+        endWithReason('failed');
+      }
+    }, CALL_CONNECT_TIMEOUT_MS);
+  }
+
+  // --- Mute -------------------------------------------------------------
+
+  function toggleMute() {
+    if (!state.localStream) return;
+    state.muted = !state.muted;
+    state.localStream.getAudioTracks().forEach(function (track) {
+      track.enabled = !state.muted; // stops sending audio without touching the call itself — see task's mute contract
+    });
+    renderMuteButton();
+  }
+
+  function renderMuteButton() {
+    $muteBtn
+      .toggleClass('is-active', state.muted)
+      .attr('aria-label', state.muted ? 'Unmute microphone' : 'Mute microphone')
+      .attr('title', state.muted ? 'Unmute' : 'Mute')
+      .find('i')
+      .attr('data-lucide', state.muted ? 'mic-off' : 'mic');
+    Ping.renderIcons($muteBtn[0]);
+  }
+
+  // --- Teardown / reset -------------------------------------------------
+
+  function cleanupRtc() {
+    if (state.localStream) {
+      state.localStream.getTracks().forEach(function (t) { t.stop(); });
+      state.localStream = null;
+    }
+    if (state.pc) {
+      state.pc.onicecandidate = null;
+      state.pc.ontrack = null;
+      state.pc.oniceconnectionstatechange = null;
+      state.pc.close();
+      state.pc = null;
+    }
+    $remoteAudio[0].srcObject = null;
+    clearInterval(state.durationTimer);
+    state.durationTimer = null;
+    clearTimeout(state.connectTimeoutTimer);
+    state.connectTimeoutTimer = null;
+  }
+
+  /**
+   * Ends the current call, showing a brief status screen first when one
+   * applies to this side's role (see TRANSIENT_MESSAGES) before returning to
+   * idle — or immediately/silently when `silent` is true, e.g. for
+   * hangup()/cancelCall()/rejectCall() acting on the local user's OWN click.
+   */
+  function endWithReason(reason, silent) {
+    cleanupRtc();
+    const message = !silent && TRANSIENT_MESSAGES[reason] && TRANSIENT_MESSAGES[reason][state.role];
+
+    if (reason === 'missed' && state.role === 'receiver') {
+      Ping.showToast('Missed call from ' + (state.otherUser ? state.otherUser.name : 'someone'), 'error');
+    }
+
+    if (!message) {
+      resetToIdle();
+      return;
+    }
+
+    state.phase = 'ended';
+    state.endReason = reason;
+    render();
+    state.endedDisplayTimer = setTimeout(resetToIdle, TRANSIENT_DISPLAY_MS);
+  }
+
+  function resetToIdle() {
+    // Cancel the transient "Call declined"/"Call ended"/etc. auto-dismiss
+    // timer (see endWithReason) whenever THIS runs for any other reason
+    // first — e.g. startCall() dismissing it early to place a new call
+    // right away. Without this, that original timer stays pending and
+    // fires ~TRANSIENT_DISPLAY_MS later regardless, wiping out whatever
+    // brand new call's state has since taken over (wrong callId, wrong
+    // phase, wrong everything) — clearTimeout on an already-fired timer is
+    // always a harmless no-op, so it's safe to do unconditionally here.
+    clearTimeout(state.endedDisplayTimer);
+    state.endedDisplayTimer = null;
+
+    cleanupRtc();
+    state.pollGeneration++; // invalidate any in-flight poll tied to the old call
+    state.phase = 'idle';
+    state.endReason = null;
+    state.callId = null;
+    state.role = null;
+    state.conversationId = null;
+    state.otherUser = null;
+    state.lastSignalId = 0;
+    state.pendingOffer = null;
+    state.pendingCandidates = [];
+    state.muted = false;
+    state.callStartedAt = null;
+    render();
+    scheduleNextPoll();
+  }
+
+  // --- Duration timer -----------------------------------------------------
+
+  function startDurationTimer() {
+    clearInterval(state.durationTimer);
+    updateTimerText();
+    state.durationTimer = setInterval(updateTimerText, 1000);
+  }
+
+  function updateTimerText() {
+    if (state.phase !== 'connected') return;
+    const seconds = Math.max(0, Math.floor((Date.now() - state.callStartedAt) / 1000));
+    const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const ss = String(seconds % 60).padStart(2, '0');
+    $activeBarStatus.text(mm + ':' + ss);
+  }
+
+  // --- Rendering ------------------------------------------------------
+
+  // Phases handled by the full-screen #callOverlay — a decision (calling/
+  // incoming) or a brief result notice (ended). "connecting"/"connected"
+  // are deliberately absent: those go through #activeCallBar instead (see
+  // render() below) so the chat stays usable once a call is actually
+  // under way.
+  const OVERLAY_PHASES = { calling: true, incoming: true, ended: true };
+
+  const STATUS_TEXT = {
+    calling: 'Calling…',
+    incoming: ' is calling',
+    ended: {
+      rejected: 'Call declined',
+      cancelled: 'Call ended',
+      missed: 'No answer',
+      busy: 'User is currently on another call',
+      ended: 'Call ended',
+      failed: 'Call failed'
+    }
+  };
+
+  function render() {
+    renderOverlay();
+    renderActiveBar();
+  }
+
+  function renderOverlay() {
+    const show = !!OVERLAY_PHASES[state.phase];
+    $overlay.prop('hidden', !show);
+    if (!show) return;
+
+    $overlay.attr('data-call-phase', state.phase);
+    if (state.otherUser) {
+      Avatars.apply($avatar, state.otherUser.name, state.otherUser.avatar_url);
+      $name.text(state.otherUser.name);
+    }
+
+    $actionsOutgoing.prop('hidden', state.phase !== 'calling');
+    $actionsIncoming.prop('hidden', state.phase !== 'incoming');
+
+    if (state.phase === 'incoming') {
+      $statusText.text((state.otherUser ? state.otherUser.name : 'Someone') + STATUS_TEXT.incoming);
+    } else if (state.phase === 'ended') {
+      $statusText.text(STATUS_TEXT.ended[state.endReason] || 'Call ended');
+    } else {
+      $statusText.text(STATUS_TEXT[state.phase] || '');
+    }
+  }
+
+  function renderActiveBar() {
+    const show = state.phase === 'connecting' || state.phase === 'connected';
+    $appShell.toggleClass('app-shell--call-bar', show);
+    $activeBar.prop('hidden', !show);
+    if (!show) return;
+
+    if (state.otherUser) {
+      Avatars.apply($activeBarAvatar, state.otherUser.name, state.otherUser.avatar_url);
+      $activeBarName.text(state.otherUser.name);
+    }
+    if (state.phase === 'connecting') {
+      $activeBarStatus.text('Connecting…');
+    } else {
+      updateTimerText(); // "Connected" itself is implied by the running timer
+    }
+    renderMuteButton();
+  }
+
+  function stopPolling() {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+
+  return {
+    init: init,
+    startCall: startCall,
+    stopPolling: stopPolling
+  };
+})(jQuery);
