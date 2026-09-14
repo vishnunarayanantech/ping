@@ -113,6 +113,12 @@ const Calls = (function ($) {
     screenSender: null,
     remoteScreenSharing: false,
     remoteScreenTrack: null,
+    // UI-only (feature C enhancement): whether the REMOTE screen-share
+    // viewer is showing enlarged. Never touches WebRTC/signaling/backend —
+    // see toggleScreenViewerExpanded/renderVideoPanel. Reset to false any
+    // time the viewer stops being eligible for it (not receiving a remote
+    // share, call ends, etc.) — see renderVideoPanel's `expandable` check.
+    screenViewerExpanded: false,
     // True from the moment this side either starts sending its own
     // renegotiation offer or starts answering one just received, until that
     // exchange resolves — see renegotiate/handleRenegotiationOffer. Doubles
@@ -155,6 +161,9 @@ const Calls = (function ($) {
   // #callVideoPanel: video calls (camera) OR audio calls currently sharing a
   // screen, connecting/connected only — see renderVideoPanel.
   let $videoPanel, $videoPanelAvatar, $remoteVideo, $remotePlaceholder, $localWrap, $localVideo, $localPlaceholder;
+  // Expand/collapse control for the remote screen-share viewer only — see
+  // renderVideoPanel/toggleScreenViewerExpanded.
+  let $screenExpandBtn;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -186,6 +195,7 @@ const Calls = (function ($) {
     $localWrap = $('#callLocalWrap');
     $localVideo = $('#callLocalVideo');
     $localPlaceholder = $('#callLocalPlaceholder');
+    $screenExpandBtn = $('#callScreenExpandBtn');
 
     $('#callCancelBtn').on('click', cancelCall);
     $('#callRejectBtn').on('click', rejectCall);
@@ -194,6 +204,17 @@ const Calls = (function ($) {
     $muteBtn.on('click', toggleMute);
     $cameraBtn.on('click', toggleCamera);
     $screenShareBtn.on('click', toggleScreenShare);
+    $screenExpandBtn.on('click', toggleScreenViewerExpanded);
+
+    // Only collapses an EXPANDED screen viewer — never interferes with any
+    // other Escape behavior elsewhere in the app (e.g. chat.js's own
+    // document-level Escape handler for its emoji picker/edit-cancel, which
+    // this doesn't touch or compete with).
+    $(document).on('keydown', function (e) {
+      if (e.key === 'Escape' && state.screenViewerExpanded) {
+        collapseScreenViewer();
+      }
+    });
 
     // Fetched once and cached for the session — backend/config.py's
     // ICE_STUN_URLS/TURN_* env vars are the source of truth; this just
@@ -1176,6 +1197,34 @@ const Calls = (function ($) {
     $remotePlaceholder.prop('hidden', active);
   }
 
+  // --- Screen viewer expand/collapse (UI-only — see state.screenViewerExpanded) --
+
+  /** Toggled by the expand/collapse button rendered inside the REMOTE
+   * screen-share viewer only (see renderVideoPanel's `expandable`) — a pure
+   * local view-size flip, never reachable unless actually receiving a
+   * remote share, so this can't fire for a plain video call or for this
+   * side's own local screen-share preview. */
+  function toggleScreenViewerExpanded() {
+    if (!state.remoteScreenSharing) return;
+    state.screenViewerExpanded = !state.screenViewerExpanded;
+    renderVideoPanel();
+  }
+
+  function collapseScreenViewer() {
+    if (!state.screenViewerExpanded) return;
+    state.screenViewerExpanded = false;
+    renderVideoPanel();
+  }
+
+  function renderScreenExpandButton(expanded) {
+    $screenExpandBtn
+      .attr('aria-label', expanded ? 'Collapse screen' : 'Expand screen')
+      .attr('title', expanded ? 'Collapse screen' : 'Expand screen')
+      .find('i')
+      .attr('data-lucide', expanded ? 'minimize-2' : 'maximize-2');
+    Ping.renderIcons($screenExpandBtn[0]);
+  }
+
   /** Mirrors renderLocalVideoPip, for THIS side's own screen-share preview
    * instead of a camera preview. Deliberately not mirrored (see
    * .call-video-panel--screen-share in main.css) — a shared screen, unlike a
@@ -1442,6 +1491,25 @@ const Calls = (function ($) {
     // Only ever true for an audio call actively sharing/being shared to —
     // never for a video call, so B's panel sizing/layout is untouched.
     $videoPanel.toggleClass('call-video-panel--screen-share', !isVideoCall && sharing);
+
+    // Expand/collapse (feature C UI enhancement) targets the REMOTE shared
+    // screen specifically — never a plain video call's camera feed, and
+    // never THIS side's own local screen-share preview (the sharer's own
+    // panel has no live remote track to enlarge, just their outgoing PIP —
+    // see renderLocalScreenPip). So it's only ever eligible while actually
+    // receiving someone else's share. Resetting the flag here (rather than
+    // only in cleanupRtc/resetToIdle) means every path that can make the
+    // viewer ineligible — stop sharing, hangup, remote hangup, switching
+    // back to a video call — funnels through this one check, since all of
+    // them already call renderVideoPanel().
+    const expandable = show && !isVideoCall && state.remoteScreenSharing;
+    if (!expandable) state.screenViewerExpanded = false;
+    const expanded = expandable && state.screenViewerExpanded;
+    $videoPanel.toggleClass('call-video-panel--expanded', expanded);
+    document.body.classList.toggle('call-screen-expanded-lock', expanded);
+    $screenExpandBtn.prop('hidden', !expandable);
+    if (expandable) renderScreenExpandButton(expanded);
+
     if (!show) {
       // Belt-and-braces: also cleared in cleanupRtc() on every teardown
       // path, but clearing here too means a stale frame never lingers even

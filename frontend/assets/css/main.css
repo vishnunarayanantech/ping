@@ -2522,6 +2522,41 @@ p {
   transform: none;
 }
 
+.call-video-panel__expand-btn {
+  position: absolute;
+  top: var(--space-xs);
+  right: var(--space-xs);
+  width: 30px;
+  height: 30px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+
+.call-video-panel__expand-btn:hover {
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+}
+
+.call-video-panel__expand-btn:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.call-video-panel__expand-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Belt-and-braces while the screen viewer is expanded — .app-shell is
+   already height:100vh/overflow:hidden so the dashboard never actually
+   scrolls the body, but this keeps a stray scrollbar from appearing behind
+   the fullscreen viewer on any page that doesn't share that layout.
+   Toggled from the same renderVideoPanel() codepath that resets
+   screenViewerExpanded, so it can never outlive the viewer itself. */
+.call-screen-expanded-lock {
+  overflow: hidden;
+}
+
 @media (max-width: 640px) {
   .call-video-panel {
     width: 168px;
@@ -2538,6 +2573,32 @@ p {
   .call-video-panel--screen-share {
     width: min(320px, calc(100vw - 2 * var(--space-sm) * 2));
   }
+}
+
+/* Expand/collapse for the REMOTE screen-share viewer (see calls.js's
+   toggleScreenViewerExpanded) — local UI state only, no renegotiation, no
+   signaling. Placed after the @media block above (same specificity as its
+   .call-video-panel override — the later rule wins) so the expanded layout
+   applies at every viewport width, including the ≤640px compact-panel
+   breakpoint. Deliberately reuses .call-video-panel's own z-index (480)
+   rather than introducing a new one: that's already below .active-call-bar
+   (500), so the mute/stop-sharing/hangup bar stays visible and usable on
+   top of the enlarged viewer without any extra layering rule, and already
+   below .call-overlay/.toast-container (1000) for the same reason those
+   were kept above it originally. top:52px hard-codes .active-call-bar's own
+   height, same convention .app-shell--call-bar already uses above — safe
+   here because the panel is only ever expandable while that bar is showing
+   (identical phase check in renderActiveBar/renderVideoPanel). */
+.call-video-panel--expanded {
+  top: 52px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: auto;
+  height: auto;
+  aspect-ratio: auto;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 /* 12. Profile page ------------------------------------------------------------------------ */

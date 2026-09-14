@@ -65,6 +65,13 @@
       <div class="call-video-panel__placeholder" id="callRemotePlaceholder">
         <span class="avatar avatar--lg" id="callVideoPanelAvatar"></span>
       </div>
+      <!-- Remote screen-share viewer only (see calls.js's renderVideoPanel) —
+           never shown for a plain video call or for this side's own local
+           screen-share preview. Toggles call-video-panel--expanded; icon/
+           label swap between the two states in calls.js. -->
+      <button type="button" class="icon-btn call-video-panel__expand-btn" id="callScreenExpandBtn" aria-label="Expand screen" title="Expand screen" hidden>
+        <i data-lucide="maximize-2" aria-hidden="true"></i>
+      </button>
     </div>
     <div class="call-video-panel__local-wrap" id="callLocalWrap">
       <video class="call-video-panel__local" id="callLocalVideo" autoplay muted playsinline></video>
