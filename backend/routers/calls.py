@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 
 from config import GROUP_CALL_MAX_PARTICIPANTS, get_ice_servers
 from database import get_db
-from models import Call, Conversation, User
+from models import Call, CallParticipant, Conversation, User
 from schemas import (
+    AddGroupCallParticipantsCreate,
     CallActiveResponse,
     CallCreate,
     CallResponse,
@@ -289,6 +290,84 @@ def create_group_call(
         call = call_service.create_group_call(db, current_user.id, payload.conversation_id, other_member_id, extra_ids)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return GroupCallResponse(success=True, call=call_service.to_group_call_out(call))
+
+
+@router.post("/group/{call_id}/participants", response_model=GroupCallResponse, status_code=status.HTTP_201_CREATED)
+def add_group_call_participants(
+    call_id: int,
+    payload: AddGroupCallParticipantsCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Mid-call "Add People" — invites more users into an ALREADY ACTIVE group
+    call. Deliberately NOT restricted to the call's creator (unlike
+    .../end below): any currently JOINED participant may invite more people,
+    same as any of them can already leave independently. Unlike
+    create_group_call's participant_ids above, targets here need not already
+    be a "contact" of the requester — the frontend's picker is the existing
+    company-wide user search, not a conversation list — so the only
+    eligibility checks are "is a real user", "isn't already an active
+    participant", and "fits under the cap" (all in
+    services/call_service.add_group_call_participants, re-checked as close
+    to the write as this codebase's cap checks elsewhere already are).
+
+    Existing participants learn about the new invitee(s) the same way they
+    already learn about anything else that changes mid-call: the next
+    GET /calls/group/{id} poll's participants list includes the new
+    "invited" row(s) — no separate broadcast needed, same as the original
+    at-creation invitations never needed one either.
+    """
+    call = _get_group_call_or_404(db, call_id)
+    if call.status != call_service.GROUP_ACTIVE_STATUS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This group call has already ended")
+
+    requester = _require_group_access(db, call_id, current_user.id)
+    if requester.status != "joined":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You aren't in this call")
+
+    user_ids = set(payload.user_ids)
+    user_ids.discard(current_user.id)  # can't invite yourself
+    if not user_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one person to add")
+
+    existing_user_ids = {u.id for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+    missing_ids = user_ids - existing_user_ids
+    if missing_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more selected users don't exist")
+
+    # Fast path for the common case: reject up front (409) if any target is
+    # ALREADY an active participant, rather than only discovering that via
+    # the service's own ValueError below. services/call_service.
+    # add_group_call_participants still repeats a version of this check
+    # itself, as close to the write as practical — that's the race-closing
+    # re-check (task's "two participants simultaneously add people"
+    # scenario), not redundant with this one, which just gives the common,
+    # non-racy case a precise, immediate 409 without touching the DB twice.
+    already_active_ids = {
+        p.user_id
+        for p in db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call_id)
+        .filter(CallParticipant.user_id.in_(user_ids))
+        .filter(CallParticipant.status.in_(("invited", "joined")))
+        .all()
+    }
+    if already_active_ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="One or more selected people are already in this call")
+
+    try:
+        call = call_service.add_group_call_participants(db, call, user_ids)
+    except ValueError as exc:
+        # Both remaining failure modes here — the cap-exceeded check and the
+        # race-lost IntegrityError fallback (see that function's docstring)
+        # — are "the call's roster changed since you last checked", the
+        # same conflict story as the precheck above, so both map to 409
+        # too. Different from create_group_call's OWN cap ValueError, which
+        # stays a 400 — that's a single atomic creation with nothing to
+        # race against, not a live roster someone else could be changing.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     return GroupCallResponse(success=True, call=call_service.to_group_call_out(call))
 

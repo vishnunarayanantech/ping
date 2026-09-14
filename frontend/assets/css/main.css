@@ -2850,6 +2850,14 @@ p {
   color: var(--color-text-muted);
 }
 
+/* Add People modal's search box — reuses .search-input/.search-input__icon
+   verbatim (see index.html's comment) with just enough of its own margin to
+   sit flush inside the modal, same padding rhythm .group-call-modal__hint
+   already uses. */
+.group-call-modal__search {
+  margin: var(--space-sm) var(--space-lg) 0;
+}
+
 .group-call-modal__list {
   flex: 1;
   min-height: 0;

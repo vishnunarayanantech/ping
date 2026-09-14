@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import CALL_RING_TIMEOUT_SECONDS, GROUP_CALL_MAX_PARTICIPANTS
@@ -247,6 +248,80 @@ def create_group_call(
         db.add(CallParticipant(call_id=call.id, user_id=user_id, status="invited"))
 
     db.commit()
+    db.refresh(call)
+    return call
+
+
+def add_group_call_participants(db: Session, call: Call, user_ids: Iterable[int]) -> Call:
+    """
+    Invites `user_ids` into an ALREADY ACTIVE group call — the mid-call "Add
+    People" counterpart to create_group_call above. routers/calls.py has
+    already checked every id is a real user and none is currently an active
+    (invited/joined) participant — using a query result it read a moment
+    earlier. This function deliberately re-reads both the roster count AND
+    each target's current CallParticipant row itself, right before writing,
+    rather than trusting that earlier read: two participants clicking "Add
+    People" for different people at nearly the same instant is exactly the
+    kind of race the router's own pre-check can't fully close (task's
+    "two existing participants simultaneously try to add people" scenario),
+    so the authoritative check happens as close to the write as this
+    codebase's plain check-then-write style (same as every other cap check
+    here — see create_group_call/join_group_call) reasonably allows.
+
+    Someone who previously LEFT this same call (a row exists with
+    status="left") is reactivated back to "invited" rather than getting a
+    second row — the uq_call_participant constraint forbids a second row
+    for the same call+user, and re-inviting a former participant is exactly
+    what should happen here anyway.
+
+    Raises ValueError — turned into a 409 by routers/calls.py (a live
+    roster is something OTHER requests can change concurrently, unlike
+    create_group_call's own cap ValueError, which stays a 400 since that's
+    a single atomic creation with nothing to race against) — if the
+    resulting roster would exceed config.GROUP_CALL_MAX_PARTICIPANTS, OR if
+    a concurrent identical request won the race for one of these same
+    user_ids (caught via IntegrityError on the unique constraint) —
+    "conflict, nothing written, try again" either way. No row is written in
+    either case: the count check runs before any write, and the race case
+    rolls back whatever this call's own attempt had staged.
+    """
+    user_ids = set(user_ids)
+
+    existing_rows = {
+        p.user_id: p
+        for p in db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call.id)
+        .filter(CallParticipant.user_id.in_(user_ids))
+        .all()
+    }
+    already_active = {uid for uid, p in existing_rows.items() if p.status in ("invited", "joined")}
+    if already_active:
+        raise ValueError("One or more selected people are already in this call.")
+
+    current_count = (
+        db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call.id)
+        .filter(CallParticipant.status.in_(("invited", "joined")))
+        .count()
+    )
+    new_count = sum(1 for uid in user_ids if uid not in existing_rows)
+    if current_count + new_count > GROUP_CALL_MAX_PARTICIPANTS:
+        raise ValueError(f"Group calls are limited to {GROUP_CALL_MAX_PARTICIPANTS} participants.")
+
+    for user_id in user_ids:
+        row = existing_rows.get(user_id)
+        if row:
+            row.status = "invited"
+            row.left_at = None
+        else:
+            db.add(CallParticipant(call_id=call.id, user_id=user_id, status="invited"))
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("One or more selected people were just added to this call.")
+
     db.refresh(call)
     return call
 

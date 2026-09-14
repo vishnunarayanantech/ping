@@ -604,6 +604,23 @@ class GroupCallCreate(BaseModel):
     participant_ids: List[int] = Field(default_factory=list, max_length=20)
 
 
+class AddGroupCallParticipantsCreate(BaseModel):
+    """POST /calls/group/{call_id}/participants body — the mid-call "Add
+    People" counterpart to GroupCallCreate.participant_ids above, for a call
+    that's already active. Deliberately UNLIKE participant_ids above: those
+    extra invitees must already be a "contact" (has_direct_conversation) of
+    the creator, but user_ids here has no such restriction — the frontend's
+    picker is the existing COMPANY-WIDE user search (GET /users/search, the
+    same one the sidebar's "start a new conversation" uses), not the
+    creator's own conversation list, so any registered user is a valid
+    candidate here. routers/calls.py still independently verifies each one
+    exists, isn't already an active (invited/joined) participant, and that
+    the resulting roster wouldn't exceed config.GROUP_CALL_MAX_PARTICIPANTS
+    — this schema only bounds the request body's own shape."""
+
+    user_ids: List[int] = Field(min_length=1, max_length=20)
+
+
 class GroupCallParticipantOut(BaseModel):
     user: UserOut
     status: str  # invited | joined | left

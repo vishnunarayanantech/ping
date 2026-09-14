@@ -175,7 +175,18 @@ const GroupCalls = (function ($) {
     // chat.js's replyTo uses.
     modalConversationId: null,
     modalOtherUser: null,
-    modalSelected: new Set()
+    modalSelected: new Set(),
+    // --- Add People (mid-call) modal — see openAddPeopleModal. A SEPARATE
+    // selection Set from modalSelected above (different modal, different
+    // lifetime) holding {id -> user} rather than just ids, since a pick can
+    // scroll out of the current search RESULTS (a later query for a
+    // different name) while still needing to render as selected/counted —
+    // see renderAddPeopleHint. Never persisted beyond the modal's own
+    // open/close, same as modalSelected.
+    addPeopleSelected: new Map(),
+    addPeopleSearchSeq: 0,
+    addPeopleDebounceTimer: null,
+    addingPeople: false
   };
 
   let $appShell;
@@ -187,6 +198,9 @@ const GroupCalls = (function ($) {
   // Screen sharing — see the module docstring's screen-sharing paragraphs.
   let $screenShareBtn, $sharingIndicator, $sharingIndicatorText;
   let $screenPanel, $screenVideo, $screenExpandBtn;
+  // Add People (mid-call) — see openAddPeopleModal.
+  let $addPeopleBtn, $addPeopleModalOverlay, $addPeopleSearchInput, $addPeopleHint, $addPeopleList;
+  let $addPeopleCancelBtn, $addPeopleConfirmBtn, $addPeopleModalCloseBtn;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -225,6 +239,15 @@ const GroupCalls = (function ($) {
     $modalConfirmBtn = $('#groupCallStartConfirmBtn');
     $modalCloseBtn = $('#groupCallStartModalClose');
 
+    $addPeopleBtn = $('#groupCallAddPeopleBtn');
+    $addPeopleModalOverlay = $('#groupCallAddPeopleModalOverlay');
+    $addPeopleSearchInput = $('#groupCallAddPeopleSearchInput');
+    $addPeopleHint = $('#groupCallAddPeopleHint');
+    $addPeopleList = $('#groupCallAddPeopleList');
+    $addPeopleCancelBtn = $('#groupCallAddPeopleCancelBtn');
+    $addPeopleConfirmBtn = $('#groupCallAddPeopleConfirmBtn');
+    $addPeopleModalCloseBtn = $('#groupCallAddPeopleModalClose');
+
     $joinBtn.on('click', joinIncoming);
     $dismissBtn.on('click', dismissIncoming);
     $muteBtn.on('click', toggleMute);
@@ -235,6 +258,12 @@ const GroupCalls = (function ($) {
 
     $screenShareBtn.on('click', toggleScreenShare);
     $screenExpandBtn.on('click', toggleScreenViewerExpanded);
+
+    $addPeopleBtn.on('click', openAddPeopleModal);
+    $addPeopleCancelBtn.on('click', closeAddPeopleModal);
+    $addPeopleModalCloseBtn.on('click', closeAddPeopleModal);
+    $addPeopleConfirmBtn.on('click', confirmAddPeople);
+    $addPeopleSearchInput.on('input', onAddPeopleSearchInput);
 
     // Only collapses an EXPANDED screen viewer — mirrors calls.js's own
     // document-level Escape handler for its 1:1 viewer (never interferes
@@ -478,6 +507,174 @@ const GroupCalls = (function ($) {
     const participantIds = Array.from(state.modalSelected);
     closeStartModal();
     startGroupCall(conversationId, participantIds);
+  }
+
+  // --- Add People (mid-call) -----------------------------------------------
+  // A SEPARATE modal/search from openStartModal above — see index.html's
+  // comment on #groupCallAddPeopleModalOverlay for why this one searches
+  // the whole company (GET /users/search, the same endpoint the sidebar's
+  // own "start a new conversation" search already uses — see users.js)
+  // rather than only the creator's existing conversations. Deliberately
+  // NOT calling Users.init() to reuse that module directly: it's already
+  // permanently bound to the sidebar's own #userSearchInput/#searchResults
+  // and shares one module-level debounce/request-sequence pair — wiring a
+  // SECOND independent search through the same shared state would risk one
+  // search's in-flight request clobbering the other's if both happened to
+  // be used around the same time. Same debounce/min-length feel as
+  // users.js, just a self-contained copy.
+
+  const ADD_PEOPLE_DEBOUNCE_MS = 300;
+  const ADD_PEOPLE_MIN_QUERY_LENGTH = 2;
+
+  function currentRosterCount() {
+    // state.participants only ever holds invited/joined rows (a 'left'
+    // participant is deleted from it outright — see reconcileParticipants),
+    // so its size IS the live roster count the cap applies to.
+    return state.participants.size;
+  }
+
+  function remainingAddPeopleSlots() {
+    return GROUP_CALL_MAX_PARTICIPANTS - currentRosterCount();
+  }
+
+  function openAddPeopleModal() {
+    if (state.phase !== 'active' || !state.callId) return;
+    if (remainingAddPeopleSlots() <= 0) {
+      Ping.showToast('Group calls are limited to ' + GROUP_CALL_MAX_PARTICIPANTS + ' participants.', 'error');
+      return;
+    }
+
+    state.addPeopleSelected = new Map();
+    $addPeopleSearchInput.val('');
+    $addPeopleList.empty().text('Type at least ' + ADD_PEOPLE_MIN_QUERY_LENGTH + ' characters to search for people to add.');
+    $addPeopleModalOverlay.prop('hidden', false);
+    renderAddPeopleHint();
+    $addPeopleSearchInput.trigger('focus');
+  }
+
+  function closeAddPeopleModal() {
+    $addPeopleModalOverlay.prop('hidden', true);
+    clearTimeout(state.addPeopleDebounceTimer);
+    state.addPeopleSearchSeq++; // invalidate any in-flight search response
+    state.addPeopleSelected = new Map();
+  }
+
+  function renderAddPeopleHint() {
+    const remaining = remainingAddPeopleSlots() - state.addPeopleSelected.size;
+    $addPeopleHint.text(
+      state.addPeopleSelected.size + (state.addPeopleSelected.size === 1 ? ' person selected' : ' people selected') +
+      ' (' + Math.max(0, remaining) + ' of ' + remainingAddPeopleSlots() + ' slots left).'
+    );
+  }
+
+  function onAddPeopleSearchInput() {
+    const query = $addPeopleSearchInput.val().trim();
+    clearTimeout(state.addPeopleDebounceTimer);
+
+    if (query.length < ADD_PEOPLE_MIN_QUERY_LENGTH) {
+      state.addPeopleSearchSeq++; // invalidate any in-flight request's response
+      $addPeopleList.empty().text('Type at least ' + ADD_PEOPLE_MIN_QUERY_LENGTH + ' characters to search for people to add.');
+      return;
+    }
+
+    state.addPeopleDebounceTimer = setTimeout(function () {
+      runAddPeopleSearch(query);
+    }, ADD_PEOPLE_DEBOUNCE_MS);
+  }
+
+  function runAddPeopleSearch(query) {
+    const seq = ++state.addPeopleSearchSeq;
+    $addPeopleList.empty().text('Searching…');
+
+    Api.request({ url: '/users/search?q=' + encodeURIComponent(query) })
+      .done(function (response) {
+        if (seq !== state.addPeopleSearchSeq) return; // a newer search superseded this one
+        renderAddPeopleResults(response.users);
+      })
+      .fail(function (xhr) {
+        if (seq !== state.addPeopleSearchSeq) return;
+        $addPeopleList.empty().text(Ping.getErrorMessage(xhr, 'Search failed. Please try again.'));
+      });
+  }
+
+  /** Renders search results filtered down to ELIGIBLE candidates only (task
+   * requirement) — anyone already an active (invited/joined) participant is
+   * excluded outright, never shown greyed-out, since GET /users/search
+   * already excludes the searcher themselves server-side. The remaining
+   * participant-limit is enforced the same way openStartModal's own
+   * checkbox handler already does: a click that would exceed it is
+   * rejected with a toast rather than the list being pre-filtered by
+   * count, since the count changes as THIS modal's own selection grows. */
+  function renderAddPeopleResults(users) {
+    $addPeopleList.empty();
+    const eligible = users.filter(function (u) { return !state.participants.has(u.id); });
+
+    if (eligible.length === 0) {
+      $addPeopleList.text('No eligible people found matching your search.');
+      return;
+    }
+
+    eligible.forEach(function (user) {
+      const $item = $('<label>', { class: 'group-call-contact-item' });
+      const $checkbox = $('<input>', { type: 'checkbox', value: user.id });
+      $checkbox.prop('checked', state.addPeopleSelected.has(user.id));
+      $checkbox.on('change', function () {
+        if (this.checked) {
+          if (state.addPeopleSelected.size >= remainingAddPeopleSlots()) {
+            this.checked = false;
+            Ping.showToast('Group calls are limited to ' + GROUP_CALL_MAX_PARTICIPANTS + ' participants.', 'error');
+            return;
+          }
+          state.addPeopleSelected.set(user.id, user);
+        } else {
+          state.addPeopleSelected.delete(user.id);
+        }
+        renderAddPeopleHint();
+      });
+      const $avatar = $('<span>', { class: 'avatar avatar--sm' });
+      Avatars.apply($avatar, user.name, user.avatar_url);
+      $item.append($checkbox, $avatar, $('<span>', { class: 'group-call-contact-item__name', text: user.name }));
+      $addPeopleList.append($item);
+    });
+  }
+
+  function confirmAddPeople() {
+    if (!state.callId || state.addPeopleSelected.size === 0 || state.addingPeople) return;
+    const callId = state.callId;
+    const userIds = Array.from(state.addPeopleSelected.keys());
+    state.addingPeople = true;
+
+    Api.request({
+      url: '/calls/group/' + callId + '/participants',
+      method: 'POST',
+      data: { user_ids: userIds }
+    })
+      .done(function (response) {
+        closeAddPeopleModal();
+        // Same incremental reconciliation every OTHER participant's next
+        // poll already does (see handleCallUpdate) — no full rebuild, the
+        // newly-invited row(s) just get added as fresh Map entries and a
+        // new panel row (task requirement).
+        reconcileParticipants(response.call.participants);
+        render();
+        Ping.showToast(
+          userIds.length === 1 ? 'Invitation sent.' : userIds.length + ' invitations sent.',
+          'success'
+        );
+      })
+      .fail(function (xhr) {
+        Ping.showToast(Ping.getErrorMessage(xhr, 'Unable to add people to this call.'), 'error');
+      })
+      .always(function () {
+        state.addingPeople = false;
+      });
+  }
+
+  function renderAddPeopleButton() {
+    const atCap = remainingAddPeopleSlots() <= 0;
+    $addPeopleBtn
+      .prop('disabled', atCap)
+      .attr('title', atCap ? 'Group calls are limited to ' + GROUP_CALL_MAX_PARTICIPANTS + ' participants' : 'Add People');
   }
 
   function startGroupCall(conversationId, participantIds) {
@@ -1279,6 +1476,7 @@ const GroupCalls = (function ($) {
     cleanupLocalMedia();
     stopLocalScreenShareTracks();
     stopSpeakingDetection();
+    if (!$addPeopleModalOverlay.prop('hidden')) closeAddPeopleModal(); // e.g. the call ended while this side had it open
 
     state.pollGeneration++;
     state.phase = 'idle';
@@ -1351,6 +1549,7 @@ const GroupCalls = (function ($) {
 
     renderScreenShareButton();
     renderSharingIndicator();
+    renderAddPeopleButton();
 
     Ping.renderIcons($bar[0]);
   }

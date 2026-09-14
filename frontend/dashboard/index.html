@@ -99,6 +99,14 @@
     <button type="button" class="icon-btn group-call-bar__screen-share" id="groupCallScreenShareBtn" aria-label="Share your screen" title="Share Screen">
       <i data-lucide="screen-share" aria-hidden="true"></i>
     </button>
+    <!-- Any joined participant may invite more people (never creator-only,
+         unlike "End for all" below) — see groupcalls.js's openAddPeopleModal.
+         Disabled (not hidden) once the roster is already at the 6-person
+         cap, same "visible but non-interactive" posture as the screen-share
+         button above. -->
+    <button type="button" class="icon-btn group-call-bar__add-people" id="groupCallAddPeopleBtn" aria-label="Add people" title="Add People">
+      <i data-lucide="user-plus" aria-hidden="true"></i>
+    </button>
     <button type="button" class="icon-btn group-call-bar__people" id="groupCallPeopleBtn" aria-label="Show participants" title="Participants">
       <i data-lucide="users" aria-hidden="true"></i>
     </button>
@@ -335,6 +343,40 @@
       <footer class="modal__footer">
         <button type="button" class="btn btn--secondary" id="groupCallStartCancelBtn">Cancel</button>
         <button type="button" class="btn btn--primary" id="groupCallStartConfirmBtn">Start Call</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Add People (mid-call) — reuses the EXISTING company-wide user search
+       (same GET /users/search endpoint the sidebar's "start a new
+       conversation" search already uses — see users.js), not the
+       start-group-call modal's "your existing conversations" contact list
+       above, since anyone already in a live call should be able to add any
+       colleague, not just their own contacts. Results render as the SAME
+       checkbox-row list style as #groupCallContactList so the two modals
+       still feel like one design language. See groupcalls.js's
+       openAddPeopleModal/runAddPeopleSearch. -->
+  <div class="modal-overlay" id="groupCallAddPeopleModalOverlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="groupCallAddPeopleModalTitle">
+      <header class="modal__header">
+        <h2 class="modal__title" id="groupCallAddPeopleModalTitle">Add People</h2>
+        <button type="button" class="icon-btn modal__close" id="groupCallAddPeopleModalClose" aria-label="Close">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </header>
+
+      <div class="search-input group-call-modal__search">
+        <i data-lucide="search" class="search-input__icon" aria-hidden="true"></i>
+        <input type="text" id="groupCallAddPeopleSearchInput" placeholder="Search people to add…" autocomplete="off">
+      </div>
+
+      <p class="group-call-modal__hint" id="groupCallAddPeopleHint"></p>
+
+      <div class="group-call-modal__list" id="groupCallAddPeopleList"></div>
+
+      <footer class="modal__footer">
+        <button type="button" class="btn btn--secondary" id="groupCallAddPeopleCancelBtn">Cancel</button>
+        <button type="button" class="btn btn--primary" id="groupCallAddPeopleConfirmBtn">Invite</button>
       </footer>
     </div>
   </div>
