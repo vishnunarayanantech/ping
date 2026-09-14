@@ -63,6 +63,34 @@ def is_conversation_member(db: Session, conversation_id: int, user_id: int) -> b
     )
 
 
+def has_direct_conversation(db: Session, user_a_id: int, user_b_id: int) -> bool:
+    """
+    Whether a direct conversation already exists between these two users —
+    read-only, unlike get_or_create_direct_conversation above (never creates
+    one). This is group calling's eligibility check (services/call_service.
+    create_group_call): a group call's creator may only invite people they
+    already have an existing conversation with, i.e. actual contacts, never
+    an arbitrary user id — see the group-calling feature's "do not
+    automatically call every company employee" requirement.
+    """
+    if user_a_id == user_b_id:
+        return False
+
+    user_a_conversation_ids = db.query(ConversationMember.conversation_id).filter(
+        ConversationMember.user_id == user_a_id
+    )
+
+    return (
+        db.query(Conversation)
+        .filter(Conversation.conversation_type == "direct")
+        .filter(Conversation.id.in_(user_a_conversation_ids))
+        .join(ConversationMember, ConversationMember.conversation_id == Conversation.id)
+        .filter(ConversationMember.user_id == user_b_id)
+        .first()
+        is not None
+    )
+
+
 def get_user_conversations(
     db: Session, user_id: int
 ) -> Tuple[List[Conversation], Dict[int, Message], Dict[int, User], Dict[int, int]]:

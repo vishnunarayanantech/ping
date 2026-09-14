@@ -393,6 +393,14 @@ const Calls = (function ($) {
       Ping.showToast('You are already on a call.', 'error');
       return;
     }
+    if (window.GroupCalls && GroupCalls.isActive()) {
+      // A 1:1 call and a group call can never run at once (two competing
+      // getUserMedia acquisitions/RTCPeerConnections for the same mic) —
+      // see groupcalls.js's module docstring. window.GroupCalls-guarded
+      // since calls.js loads before groupcalls.js in dashboard/index.html.
+      Ping.showToast('You are already in a group call.', 'error');
+      return;
+    }
     if (!rtcSupported()) {
       Ping.showToast('Your browser does not support ' + callType + ' calls.', 'error');
       return;
@@ -1533,9 +1541,21 @@ const Calls = (function ($) {
     state.pollTimer = null;
   }
 
+  /** Whether a 1:1 call is currently starting/ringing/connecting/connected —
+   * checked by groupcalls.js before starting or joining a group call, and
+   * vice versa (see GroupCalls.isActive), so a user can never end up
+   * straddling both at once (two simultaneous getUserMedia acquisitions,
+   * two RTCPeerConnections competing for the same mic). Deliberately
+   * excludes 'ended' — that's just a brief outgoing notice already on its
+   * way back to idle (see endWithReason), not a real call anymore. */
+  function isActive() {
+    return state.phase !== 'idle' && state.phase !== 'ended';
+  }
+
   return {
     init: init,
     startCall: startCall,
-    stopPolling: stopPolling
+    stopPolling: stopPolling,
+    isActive: isActive
   };
 })(jQuery);

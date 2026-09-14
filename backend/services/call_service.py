@@ -6,14 +6,14 @@ shaping only), same split as conversation_service.py / reaction_service.py.
 """
 import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from config import CALL_RING_TIMEOUT_SECONDS
-from models import Call, CallSignal, ConversationMember
-from schemas import CallOut, UserOut
+from config import CALL_RING_TIMEOUT_SECONDS, GROUP_CALL_MAX_PARTICIPANTS
+from models import Call, CallParticipant, CallSignal, ConversationMember
+from schemas import CallOut, GroupCallOut, GroupCallParticipantOut, UserOut
 
 # A call is "in progress" — busy-checking and the incoming-call poll both key
 # off this. Every other status ("rejected", "cancelled", "missed", "busy",
@@ -137,8 +137,17 @@ def end_call(db: Session, call: Call) -> Call:
     return call
 
 
-def add_signal(db: Session, call_id: int, sender_id: int, message_type: str, payload: dict) -> CallSignal:
-    signal = CallSignal(call_id=call_id, sender_id=sender_id, message_type=message_type, payload=json.dumps(payload))
+def add_signal(
+    db: Session, call_id: int, sender_id: int, message_type: str, payload: dict, peer_user_id: Optional[int] = None
+) -> CallSignal:
+    """peer_user_id defaults to None (direct calls never pass it — see
+    models.CallSignal's docstring) so this same function serves both direct
+    signaling (routers/calls.py's post_signal) and group signaling
+    (post_group_signal) without duplicating the insert."""
+    signal = CallSignal(
+        call_id=call_id, sender_id=sender_id, peer_user_id=peer_user_id, message_type=message_type,
+        payload=json.dumps(payload),
+    )
     db.add(signal)
     db.commit()
     db.refresh(signal)
@@ -170,4 +179,196 @@ def to_call_out(call: Call) -> CallOut:
         created_at=call.created_at,
         answered_at=call.answered_at,
         ended_at=call.ended_at,
+    )
+
+
+# --- Group audio calling ----------------------------------------------------
+# Kept in this same module (not a separate service file) since it's the same
+# "call" concept and the same Call table — see models.Call's scope docstring
+# — just a different shape of participant. Every function below only ever
+# touches scope="group" rows; nothing above this line was changed to make
+# room for them, so direct calling's behavior is unaffected by construction,
+# not just by convention.
+
+# A group call's own two-value status vocabulary — deliberately disjoint
+# from ACTIVE_STATUSES above (a group call is never "ringing"/"accepted"/
+# etc.), so a group row can never be mistaken for an active DIRECT call by
+# any of the functions above, with no explicit `scope` filter needed there.
+GROUP_ACTIVE_STATUS = "active"
+GROUP_ENDED_STATUS = "ended"
+
+
+def create_group_call(
+    db: Session, creator_id: int, conversation_id: int, other_member_id: int, extra_participant_ids: Iterable[int]
+) -> Call:
+    """
+    Creates the group-call session row plus one CallParticipant per invitee.
+    The creator's own row starts "joined" (they're in the call the instant
+    they create it); everyone else starts "invited" — see
+    models.CallParticipant's docstring.
+
+    other_member_id (the direct conversation's other member, resolved by the
+    caller — routers/calls.py — via the same get_other_member_id direct
+    calls already use) is always included, mirroring the existing "the call
+    button in this chat calls the person you're chatting with" convention.
+    extra_participant_ids are whoever the creator explicitly picked on top
+    of that — routers/calls.py has already checked each one is an existing
+    contact (has_direct_conversation) before this runs; this function only
+    owns the count limit and the actual writes.
+
+    Raises ValueError (caught by routers/calls.py and turned into a 400) if
+    the deduplicated roster — creator + other_member + extras — would exceed
+    config.GROUP_CALL_MAX_PARTICIPANTS. No Call/CallParticipant row is
+    created in that case, per the task's "existing call remains intact"
+    requirement for the participant-limit test — there's nothing to roll
+    back because nothing is written until after this check passes.
+    """
+    invitee_ids = {other_member_id, *extra_participant_ids}
+    invitee_ids.discard(creator_id)  # the creator can't "invite" themselves
+
+    total_participants = len(invitee_ids) + 1  # +1 for the creator
+    if total_participants > GROUP_CALL_MAX_PARTICIPANTS:
+        raise ValueError(f"Group calls are limited to {GROUP_CALL_MAX_PARTICIPANTS} participants (including you).")
+
+    now = datetime.now(timezone.utc)
+    call = Call(
+        conversation_id=conversation_id,
+        caller_id=creator_id,
+        receiver_id=creator_id,  # see models.Call's scope docstring — unused for group calls
+        status=GROUP_ACTIVE_STATUS,
+        call_type="audio",
+        scope="group",
+    )
+    db.add(call)
+    db.flush()  # assigns call.id without committing yet, so participant rows below can reference it
+
+    db.add(CallParticipant(call_id=call.id, user_id=creator_id, status="joined", joined_at=now))
+    for user_id in invitee_ids:
+        db.add(CallParticipant(call_id=call.id, user_id=user_id, status="invited"))
+
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def get_group_call_participant(db: Session, call_id: int, user_id: int) -> Optional[CallParticipant]:
+    return (
+        db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call_id)
+        .filter(CallParticipant.user_id == user_id)
+        .first()
+    )
+
+
+def get_active_group_call_for_user(db: Session, user_id: int) -> Optional[Call]:
+    """The one active group call (if any) this user currently has a live
+    stake in — invited (not yet joined, i.e. an incoming notification) or
+    already joined (e.g. resuming after a page reload) — used by
+    GET /calls/group/active, the group equivalent of get_active_call_for_user
+    above."""
+    return (
+        db.query(Call)
+        .join(CallParticipant, CallParticipant.call_id == Call.id)
+        .filter(Call.scope == "group")
+        .filter(Call.status == GROUP_ACTIVE_STATUS)
+        .filter(CallParticipant.user_id == user_id)
+        .filter(CallParticipant.status.in_(("invited", "joined")))
+        .order_by(Call.id.desc())
+        .first()
+    )
+
+
+def join_group_call(db: Session, call: Call, participant: CallParticipant) -> Call:
+    participant.status = "joined"
+    participant.joined_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def leave_group_call(db: Session, call: Call, participant: CallParticipant) -> Call:
+    """Marks just this one participant as left — the call stays "active" for
+    everyone else, UNLESS this was the last "joined" participant, in which
+    case the call auto-ends (see models.CallParticipant's docstring: nothing
+    else would ever end an abandoned group call otherwise, since ending is
+    otherwise restricted to the creator — see end_group_call)."""
+    participant.status = "left"
+    participant.left_at = datetime.now(timezone.utc)
+    db.flush()
+
+    still_joined = (
+        db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call.id)
+        .filter(CallParticipant.status == "joined")
+        .first()
+    )
+    if not still_joined:
+        call.status = GROUP_ENDED_STATUS
+        call.ended_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def end_group_call(db: Session, call: Call) -> Call:
+    """Ends the call for EVERYONE — only the creator may call this (enforced
+    in routers/calls.py, the same "flat 403 for anyone else" posture direct
+    calls use for their own role-gated actions). Every still-"joined"
+    participant is flipped to "left" so their own next poll sees both
+    call.status == "ended" and their own participant row already reflecting
+    it — see the group-calling task's "all participants are notified through
+    polling" requirement."""
+    now = datetime.now(timezone.utc)
+    call.status = GROUP_ENDED_STATUS
+    call.ended_at = now
+    (
+        db.query(CallParticipant)
+        .filter(CallParticipant.call_id == call.id)
+        .filter(CallParticipant.status == "joined")
+        .update({"status": "left", "left_at": now}, synchronize_session=False)
+    )
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def get_new_group_signals(db: Session, call_id: int, current_user_id: int, after_id: int) -> List[CallSignal]:
+    """Every signal on this GROUP call meant for `current_user_id` — either
+    targeted at them directly (peer_user_id == them, an offer/answer/
+    ice-candidate from one specific other participant) or broadcast to
+    everyone (peer_user_id IS NULL, i.e. a "mute-state" signal) — with
+    id > after_id, same incremental-poll shape get_new_signals uses for
+    direct calls. Never returns a signal this user sent themselves, same
+    "not an echo of my own signal" rule get_new_signals already follows."""
+    return (
+        db.query(CallSignal)
+        .filter(CallSignal.call_id == call_id)
+        .filter(CallSignal.sender_id != current_user_id)
+        .filter(or_(CallSignal.peer_user_id == current_user_id, CallSignal.peer_user_id.is_(None)))
+        .filter(CallSignal.id > after_id)
+        .order_by(CallSignal.id)
+        .all()
+    )
+
+
+def to_group_call_out(call: Call) -> GroupCallOut:
+    participants = [
+        GroupCallParticipantOut(
+            user=UserOut.model_validate(p.user),
+            status=p.status,
+            joined_at=p.joined_at,
+            left_at=p.left_at,
+        )
+        for p in call.participants
+    ]
+    return GroupCallOut(
+        id=call.id,
+        conversation_id=call.conversation_id,
+        creator=UserOut.model_validate(call.caller),
+        call_type=call.call_type,
+        status=call.status,
+        created_at=call.created_at,
+        ended_at=call.ended_at,
+        participants=participants,
     )

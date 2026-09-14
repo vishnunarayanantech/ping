@@ -96,6 +96,14 @@ const Chat = (function ($) {
       Calls.startCall(state.conversationId, state.otherUser, 'video');
     });
 
+    // groupcalls.js owns everything about a group call the same way
+    // calls.js owns 1:1 calling — this just tells it which conversation to
+    // start one from, same pattern as the two buttons above.
+    $('#groupCallBtn').on('click', function () {
+      if (!state.conversationId) return;
+      GroupCalls.openStartModal(state.conversationId, state.otherUser);
+    });
+
     // Same close button drives both the reply preview and the edit preview
     // (they're the same bar — see renderReplyPreview) — whichever one is
     // actually active is what Escape/this click cancels.

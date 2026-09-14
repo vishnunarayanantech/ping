@@ -52,3 +52,16 @@ const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 // call setup) so a lost renegotiation signal can't leave the "Share Screen"
 // button stuck disabled forever.
 const CALL_RENEGOTIATION_TIMEOUT_MS = 15000;
+
+// Group audio calling (see groupcalls.js) — a SEPARATE poll loop from
+// calls.js's (one-to-one calling and group calling are independent
+// features that can't overlap for one user — see groupcalls.js's module
+// docstring), but reusing the exact same two-speed idea: slow while idle
+// (just checking for an invitation), fast once actually in a call.
+const GROUP_CALL_POLL_INTERVAL_IDLE_MS = CONVERSATION_POLL_INTERVAL;
+const GROUP_CALL_POLL_INTERVAL_ACTIVE_MS = 1500;
+
+// Mirrors backend/config.py's GROUP_CALL_MAX_PARTICIPANTS default — same
+// "just a pre-flight UI check" caveat as MAX_UPLOAD_SIZE_MB above: the
+// backend enforces the real limit regardless of what this says.
+const GROUP_CALL_MAX_PARTICIPANTS = 6;

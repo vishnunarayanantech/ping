@@ -193,6 +193,32 @@ class Call(Base):
     same call_type="video" row (see calls.js's downgrade handling) rather
     than flipping this back to "audio". Defaults to "audio" so every call row
     that predates this column reads as exactly what it always was.
+
+    scope is "direct" (the original 1:1 shape above, every column meaning
+    exactly what its docstring says) or "group" (see services/call_service's
+    group-call functions and CallParticipant below). Added additively —
+    every pre-existing row is backfilled to "direct" (see main.py's
+    _add_missing_columns) so nothing about direct calling changes meaning.
+
+    For a scope="group" row: caller_id is the call's CREATOR (same column,
+    reused rather than duplicated — a group call's creator plays the same
+    "who started this" role caller_id already has). call_type is always
+    "audio" (schemas.GroupCallCreate never accepts "video" — see the group
+    calling task's explicit "audio-only" scope). receiver_id has no
+    meaningful "other party" to hold — a group call, by definition, doesn't
+    have exactly one — but the column is NOT NULL and changing that would
+    mean rebuilding the table (SQLite can't ALTER a column's nullability in
+    place), which is a bigger risk than it's worth for a column group calls
+    simply don't use. So it's set equal to caller_id: a harmless, always-
+    valid self-reference that every existing "receiver: UserOut" reader
+    still resolves fine, and that to_group_call_out never surfaces (group
+    responses carry a `participants` list from CallParticipant instead).
+    status for scope="group" uses its own two-value vocabulary ("active",
+    "ended") that never collides with the direct-call vocabulary above —
+    see call_service.ACTIVE_STATUSES, which group rows never match, so
+    every existing direct-call query (get_active_call_for_user, the busy
+    check, etc.) keeps working completely unchanged with no explicit
+    `scope` filter needed.
     """
 
     __tablename__ = "calls"
@@ -203,6 +229,7 @@ class Call(Base):
     receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     status = Column(String, nullable=False, default="ringing", index=True)
     call_type = Column(String, nullable=False, default="audio")
+    scope = Column(String, nullable=False, default="direct", index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
@@ -212,6 +239,11 @@ class Call(Base):
     # caller/receiver UserOut straight from the row without a second query.
     caller = relationship("User", foreign_keys=[caller_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
+    # Group calls only (scope="group") — every invited/joined/left user, one
+    # row per user. No cascade here on purpose, same "read-only convenience"
+    # reasoning as caller/receiver above; participants are only ever written
+    # through services/call_service's group-call functions.
+    participants = relationship("CallParticipant", back_populates="call")
 
 
 class CallSignal(Base):
@@ -222,10 +254,21 @@ class CallSignal(Base):
     "backend never touches the media" boundary as the rest of the calling
     feature) — schemas.CallSignalOut parses it back to a dict on the way out.
 
-    No `to_user_id` column: every call is exactly two participants, so "every
-    signal not sent by me" (services/call_service.get_new_signals filters on
-    sender_id != current_user.id) is already an unambiguous "for me" — this
-    would need a real recipient column the day group calls exist.
+    No `to_user_id` column: every DIRECT call is exactly two participants, so
+    "every signal not sent by me" (services/call_service.get_new_signals
+    filters on sender_id != current_user.id) is already an unambiguous "for
+    me" for scope="direct" calls — get_new_signals is never used for group
+    calls, which need a real recipient column instead (see below).
+
+    peer_user_id is that column, added additively for group calls only —
+    always NULL for a direct-call signal (get_new_signals never looks at
+    it), and always set for a group-call offer/answer/ice-candidate signal
+    (see call_service.get_new_group_signals, which filters on it instead of
+    the "everyone but me" rule above, since a group call has more than one
+    "everyone else"). The one group signal type that's a broadcast rather
+    than point-to-point — "mute-state" (schemas.CALL_SIGNAL_TYPES) — uses
+    peer_user_id=NULL deliberately, meaning "every current/future
+    participant", not "nobody in particular".
     """
 
     __tablename__ = "call_signaling"
@@ -233,6 +276,44 @@ class CallSignal(Base):
     id = Column(Integer, primary_key=True, index=True)
     call_id = Column(Integer, ForeignKey("calls.id"), nullable=False, index=True)
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    peer_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     message_type = Column(String, nullable=False)
     payload = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class CallParticipant(Base):
+    """
+    One user's membership in one GROUP call (scope="group" on Call above) —
+    direct calls have no rows here at all, since caller_id/receiver_id on
+    Call already say everything a 2-person call needs to. This is the
+    authoritative roster a group call's join/leave/signal-routing endpoints
+    check against: a user with no row (or a row whose status has already
+    moved to "left") for a given call_id simply isn't part of it, the same
+    "never trust a client-supplied participant" rule routers/calls.py
+    already applies to direct calls via _require_participant.
+
+    status starts "invited" (set for everyone except the creator when
+    services/call_service.create_group_call creates the call — the creator's
+    own row starts "joined"), moves to "joined" when that user actually
+    calls POST /calls/group/{id}/join, and to "left" when they leave (either
+    voluntarily via POST .../leave, or because the creator ended the call
+    for everyone via POST .../end). There's no "declined" — an invited user
+    who never joins just stays "invited" for the life of the call; nothing
+    times that out the way a direct call's "ringing" does, since a group
+    call has no single person whose non-answer should end it for everyone
+    else.
+    """
+
+    __tablename__ = "call_participants"
+    __table_args__ = (UniqueConstraint("call_id", "user_id", name="uq_call_participant"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    call_id = Column(Integer, ForeignKey("calls.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String, nullable=False, default="invited", index=True)
+    joined_at = Column(DateTime(timezone=True), nullable=True)
+    left_at = Column(DateTime(timezone=True), nullable=True)
+
+    call = relationship("Call", back_populates="participants")
+    user = relationship("User")

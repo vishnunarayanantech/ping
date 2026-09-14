@@ -109,6 +109,27 @@ def _add_missing_columns():
             conn.execute(text("ALTER TABLE calls ADD COLUMN call_type VARCHAR"))
             conn.execute(text("UPDATE calls SET call_type = 'audio' WHERE call_type IS NULL"))
 
+    # group calling: same trick for calls.scope. Every existing call row
+    # predates group calling, so it's backfilled to 'direct' — exactly what
+    # every one of those calls actually was (see models.Call's scope
+    # docstring). call_participants itself needs no manual migration here —
+    # it's a brand new table, so Base.metadata.create_all() above already
+    # created it.
+    call_columns = {col["name"] for col in inspector.get_columns("calls")}
+    if "scope" not in call_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE calls ADD COLUMN scope VARCHAR"))
+            conn.execute(text("UPDATE calls SET scope = 'direct' WHERE scope IS NULL"))
+
+    # group calling: same trick for call_signaling.peer_user_id. Every
+    # existing signal predates group calling and was necessarily a direct-
+    # call signal, so NULL here (see models.CallSignal's peer_user_id
+    # docstring) is exactly correct with no backfill needed.
+    signal_columns = {col["name"] for col in inspector.get_columns("call_signaling")}
+    if "peer_user_id" not in signal_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE call_signaling ADD COLUMN peer_user_id INTEGER REFERENCES users(id)"))
+
 
 _add_missing_columns()
 

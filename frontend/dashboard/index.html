@@ -51,6 +51,66 @@
     </button>
   </div>
 
+  <!-- Group audio calling (see groupcalls.js) — entirely separate DOM/state
+       from #activeCallBar above: a 1:1 call and a group call can't be
+       active at the same time (see Calls.isActive/GroupCalls.isActive), but
+       keeping them as two distinct bars/overlays (rather than teaching the
+       1:1 ones to also handle N participants) keeps the well-tested 1:1
+       call code completely untouched. -->
+
+  <!-- Incoming group-call invitation — a slim, non-blocking banner (not a
+       full-screen overlay like #callOverlay) since joining is optional and
+       the task calls for minimal interference with normal chat use. Stays
+       up (at idle poll speed) until the invitee joins, dismisses it, or the
+       call ends. -->
+  <div class="group-call-banner" id="groupCallBanner" hidden>
+    <span class="avatar avatar--sm" id="groupCallBannerAvatar"></span>
+    <span class="group-call-banner__text">
+      <strong id="groupCallBannerCreator"></strong> started a group call
+    </span>
+    <button type="button" class="btn btn--secondary" id="groupCallDismissBtn">Dismiss</button>
+    <button type="button" class="btn btn--primary" id="groupCallJoinBtn">Join</button>
+  </div>
+
+  <!-- Active group call — the compact bar (mirrors #activeCallBar's role)
+       plus its collapsible participant list panel. Visible for as long as
+       this user is joined, independent of which conversation is open. -->
+  <div class="group-call-bar" id="groupCallBar" hidden>
+    <i data-lucide="users" class="group-call-bar__icon" aria-hidden="true"></i>
+    <span class="group-call-bar__info">
+      <span class="group-call-bar__title">Group call</span>
+      <span class="group-call-bar__count" id="groupCallBarCount"></span>
+    </span>
+    <button type="button" class="icon-btn group-call-bar__mute" id="groupCallMuteBtn" aria-label="Mute microphone" title="Mute">
+      <i data-lucide="mic" aria-hidden="true"></i>
+    </button>
+    <button type="button" class="icon-btn group-call-bar__people" id="groupCallPeopleBtn" aria-label="Show participants" title="Participants">
+      <i data-lucide="users" aria-hidden="true"></i>
+    </button>
+    <!-- Creator only — see groupcalls.js's renderBar. Anyone (including the
+         creator) can also just leave without ending it for everyone. -->
+    <button type="button" class="btn btn--secondary group-call-bar__end" id="groupCallEndBtn" hidden>End for all</button>
+    <button type="button" class="call-btn call-btn--end group-call-bar__leave" id="groupCallLeaveBtn" aria-label="Leave call" title="Leave call">
+      <i data-lucide="phone-off" aria-hidden="true"></i>
+    </button>
+  </div>
+
+  <div class="group-call-panel" id="groupCallPanel" hidden>
+    <div class="group-call-panel__header">
+      <span>Participants</span>
+      <button type="button" class="icon-btn" id="groupCallPanelClose" aria-label="Close participants">
+        <i data-lucide="x" aria-hidden="true"></i>
+      </button>
+    </div>
+    <div class="group-call-panel__list" id="groupCallParticipantList"></div>
+  </div>
+
+  <!-- One <audio autoplay> per remote participant, created/removed by
+       groupcalls.js as peers join/leave — unlike #callRemoteAudio (a single
+       fixed element for the one 1:1 remote party), a group call's peer
+       count is variable, so these can't be static markup. -->
+  <div id="groupCallAudioContainer" hidden></div>
+
   <!-- Floating video panel: remote video primary, local video PIP. Only
        relevant for video calls, and only once the call is actually
        connecting/connected (see calls.js's renderVideoPanel) — the
@@ -151,6 +211,9 @@
           <button type="button" class="icon-btn chat-header__call-btn" id="videoCallBtn" aria-label="Start video call" title="Video call">
             <i data-lucide="video" aria-hidden="true"></i>
           </button>
+          <button type="button" class="icon-btn chat-header__call-btn" id="groupCallBtn" aria-label="Start group call" title="Group call">
+            <i data-lucide="users" aria-hidden="true"></i>
+          </button>
         </header>
 
         <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
@@ -217,6 +280,30 @@
       <footer class="modal__footer">
         <button type="button" class="btn btn--secondary" id="forwardCancelBtn">Cancel</button>
         <button type="button" class="btn btn--primary" id="forwardConfirmBtn" disabled>Forward</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Start-group-call modal: picks WHO beyond the current chat partner
+       (always included automatically — see groupcalls.js) to invite, from
+       the creator's own existing conversations. Same modal-overlay/modal
+       structure as the forward-message modal above. -->
+  <div class="modal-overlay" id="groupCallStartModalOverlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="groupCallStartModalTitle">
+      <header class="modal__header">
+        <h2 class="modal__title" id="groupCallStartModalTitle">Start group call</h2>
+        <button type="button" class="icon-btn modal__close" id="groupCallStartModalClose" aria-label="Close">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </header>
+
+      <p class="group-call-modal__hint" id="groupCallStartModalHint"></p>
+
+      <div class="group-call-modal__list" id="groupCallContactList"></div>
+
+      <footer class="modal__footer">
+        <button type="button" class="btn btn--secondary" id="groupCallStartCancelBtn">Cancel</button>
+        <button type="button" class="btn btn--primary" id="groupCallStartConfirmBtn">Start Call</button>
       </footer>
     </div>
   </div>
@@ -297,6 +384,7 @@
   <script src="../assets/js/upload.js"></script>
   <script src="../assets/js/media.js"></script>
   <script src="../assets/js/calls.js"></script>
+  <script src="../assets/js/groupcalls.js"></script>
   <script src="../assets/js/chat.js"></script>
   <script src="../assets/js/dashboard.js"></script>
 </body>

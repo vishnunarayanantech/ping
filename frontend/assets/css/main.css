@@ -2601,6 +2601,236 @@ p {
   box-shadow: none;
 }
 
+/* 11f. Group audio calling (see groupcalls.js) ---------------------------------------------
+   A separate set of fixed-top elements from .active-call-bar above rather
+   than reusing it — a 1:1 call and a group call can never be active at the
+   same time (see Calls.isActive/GroupCalls.isActive), so there's no risk of
+   these ever needing to stack, but keeping the DOM/CSS independent means
+   nothing about the 1:1 call bar had to change to make room for this. */
+
+.group-call-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 52px;
+  padding: 0 var(--space-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+}
+
+.group-call-banner__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-call-banner__text strong {
+  color: var(--color-text-primary);
+}
+
+.group-call-banner .btn {
+  height: 36px;
+  padding: 0 var(--space-md);
+  flex-shrink: 0;
+}
+
+.group-call-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 52px;
+  padding: 0 var(--space-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Room for whichever fixed top bar is currently showing — the 1:1 call's
+   own .app-shell--call-bar (main.js/calls.js) or this one, never both at
+   once (see this section's intro comment). */
+.app-shell--group-call-bar {
+  padding-top: 52px;
+}
+
+.group-call-bar__icon {
+  width: 20px;
+  height: 20px;
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.group-call-bar__info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.group-call-bar__title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.group-call-bar__count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.group-call-bar__mute.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.group-call-bar__end {
+  height: 36px;
+  padding: 0 var(--space-md);
+  flex-shrink: 0;
+}
+
+.group-call-bar__leave {
+  width: 38px;
+  height: 38px;
+}
+
+.group-call-bar__leave svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* Floating participant list — same "own floating element, below the fixed
+   bar" treatment as .call-video-panel, just a list instead of video. */
+.group-call-panel {
+  position: fixed;
+  top: 64px;
+  right: var(--space-lg);
+  z-index: 480;
+  width: 260px;
+  max-height: min(420px, 60vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.group-call-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.group-call-panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-xs);
+}
+
+.group-call-participant {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+}
+
+/* A subtle ring around the speaker's own avatar rather than a color swap —
+   local-only (see groupcalls.js's speaking-detection docstring for why
+   remote participants never get this). */
+.group-call-participant--speaking .avatar {
+  box-shadow: 0 0 0 2px var(--color-success);
+}
+
+.group-call-participant__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-call-participant__status {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.group-call-participant__mute-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--color-error);
+}
+
+/* Start-group-call modal's contact picker — same list/row shape as
+   .forward-modal__list/.forward-conversation-item, just with a real
+   checkbox (multi-select) instead of a single-select circle. */
+.group-call-modal__hint {
+  padding: var(--space-sm) var(--space-lg) 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.group-call-modal__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-sm);
+}
+
+.group-call-contact-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.group-call-contact-item:hover {
+  background: var(--color-surface-alt);
+}
+
+.group-call-contact-item__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 12. Profile page ------------------------------------------------------------------------ */
 .profile-page {
   max-width: 780px;

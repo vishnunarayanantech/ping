@@ -82,3 +82,17 @@ def get_ice_servers():
     if TURN_URL and TURN_USERNAME and TURN_CREDENTIAL:
         servers.append({"urls": TURN_URL, "username": TURN_USERNAME, "credential": TURN_CREDENTIAL})
     return servers
+
+
+# --- Group audio calling --------------------------------------------------
+# Hard cap on total participants (including the creator) in one group call,
+# enforced server-side in services/call_service.create_group_call — never
+# just hidden behind a disabled frontend button. This first implementation
+# is a full mesh (see groupcalls.js's module docstring): every participant
+# opens one RTCPeerConnection to every OTHER participant, so the number of
+# simultaneous connections/streams grows as N*(N-1) — fine at this size, not
+# something a browser (or the "one polling loop dispatches to N peers"
+# design) should be asked to do at meeting-sized N. A larger limit would
+# need an SFU (a media server every participant sends ONE stream to, which
+# then fans it out) instead of this mesh — out of scope for this iteration.
+GROUP_CALL_MAX_PARTICIPANTS = int(os.getenv("GROUP_CALL_MAX_PARTICIPANTS", "6"))

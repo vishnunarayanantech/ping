@@ -481,17 +481,37 @@ class CallActiveResponse(BaseModel):
 # the two apart by whether the peer connection already has a remote
 # description, not by a distinct signal type, so no new type was needed for
 # that part.
-CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state", "screen-share-state"}
+#
+# "mute-state" (group calls only — see groupcalls.js) is the group
+# equivalent of "camera-state": MediaStreamTrack.enabled on a mic track
+# doesn't reliably surface as the remote side's native track-muted event
+# either, same reasoning models.CallSignal's peer_user_id docstring gives —
+# so mute needs its own explicit signal too. Sent with peer_user_id=None
+# (broadcast to every participant) rather than once per peer, since one
+# user's mute state is the same fact for everybody in the call, not a
+# pairwise negotiation like offer/answer/ice-candidate are.
+CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state", "screen-share-state", "mute-state"}
 
 
 class CallSignalCreate(BaseModel):
-    """POST /calls/{call_id}/signals body. `payload` is passed through to the
-    other participant completely opaque to the backend (it's SDP/ICE data
-    meant for the browser's WebRTC stack, never interpreted server-side) —
-    see models.CallSignal's docstring."""
+    """POST /calls/{call_id}/signals (direct) or
+    POST /calls/group/{call_id}/signals (group) body. `payload` is passed
+    through to the recipient(s) completely opaque to the backend (it's
+    SDP/ICE data meant for the browser's WebRTC stack, never interpreted
+    server-side) — see models.CallSignal's docstring.
+
+    peer_user_id is group-calls-only: which OTHER participant this signal is
+    for (routers/calls.py validates both sender and target are current
+    participants of the same call before storing it), or None for a
+    broadcast "mute-state" signal. Always None/omitted for a direct-call
+    signal — get_new_signals never reads it, so it's simply unused there,
+    same as every direct-call row already has scope="direct" and no
+    CallParticipant rows.
+    """
 
     message_type: str
     payload: Dict[str, Any]
+    peer_user_id: Optional[int] = None
 
     @field_validator("message_type")
     @classmethod
@@ -543,3 +563,87 @@ class CallStateResponse(BaseModel):
 class IceServersResponse(BaseModel):
     success: bool
     ice_servers: List[Dict[str, str]]
+
+
+# --- Calling (group audio) --------------------------------------------------
+# A separate section rather than folding into CallCreate/CallOut above: a
+# group call's shape (a creator plus a roster of N participants, no single
+# "receiver") is different enough from a direct call's that reusing the same
+# schemas would mean making half their fields optional/meaningless for one
+# scope or the other. See models.Call's scope docstring for how the two
+# share the same underlying table without either one's meaning drifting.
+
+
+class GroupCallCreate(BaseModel):
+    """POST /calls/group body. conversation_id must be a direct conversation
+    the caller belongs to (same membership check as CallCreate) — its OTHER
+    member is always included automatically, mirroring the existing "call
+    button in this chat's header calls the person you're chatting with"
+    convention. participant_ids are ADDITIONAL people to invite, explicitly
+    selected by the creator — see routers/calls.py's eligibility check
+    (each one must already share a direct conversation with the creator,
+    i.e. already be a "contact", never an arbitrary company-wide user id).
+    The max_length here is just a generous sanity bound on the request body
+    itself; the real, authoritative participant-count limit
+    (config.GROUP_CALL_MAX_PARTICIPANTS) is enforced in
+    services/call_service.create_group_call against the deduplicated total
+    including the creator and the conversation's other member."""
+
+    conversation_id: int
+    participant_ids: List[int] = Field(default_factory=list, max_length=20)
+
+
+class GroupCallParticipantOut(BaseModel):
+    user: UserOut
+    status: str  # invited | joined | left
+    joined_at: Optional[datetime] = None
+    left_at: Optional[datetime] = None
+
+    @field_validator("joined_at", "left_at")
+    @classmethod
+    def _optional_utc(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _ensure_utc(value) if value is not None else None
+
+
+class GroupCallOut(BaseModel):
+    id: int
+    conversation_id: int
+    creator: UserOut
+    call_type: str
+    status: str  # active | ended
+    created_at: datetime
+    ended_at: Optional[datetime] = None
+    participants: List[GroupCallParticipantOut] = Field(default_factory=list)
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_utc(cls, value: datetime) -> datetime:
+        return _ensure_utc(value)
+
+    @field_validator("ended_at")
+    @classmethod
+    def _ended_at_utc(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _ensure_utc(value) if value is not None else None
+
+
+class GroupCallResponse(BaseModel):
+    success: bool
+    call: GroupCallOut
+
+
+class GroupCallActiveResponse(BaseModel):
+    """GET /calls/group/active — call is None when the caller has no active
+    group call (invited or already joined) to resume or answer right now."""
+
+    success: bool
+    call: Optional[GroupCallOut] = None
+
+
+class GroupCallStateResponse(BaseModel):
+    """GET /calls/group/{call_id} — same "current state + everything new
+    since after_signal_id in one response" shape as CallStateResponse, see
+    its docstring."""
+
+    success: bool
+    call: GroupCallOut
+    signals: List[CallSignalOut] = Field(default_factory=list)
