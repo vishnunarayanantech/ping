@@ -81,8 +81,23 @@
       <span class="group-call-bar__title">Group call</span>
       <span class="group-call-bar__count" id="groupCallBarCount"></span>
     </span>
+    <!-- Screen sharing — hidden entirely whenever no one (including this
+         side) is sharing; shows the current sharer's name otherwise, even
+         on the sharer's own bar ("You are sharing your screen") — see
+         groupcalls.js's renderBar. -->
+    <span class="group-call-bar__sharing-indicator" id="groupCallSharingIndicator" hidden>
+      <i data-lucide="screen-share" aria-hidden="true"></i>
+      <span id="groupCallSharingIndicatorText"></span>
+    </span>
     <button type="button" class="icon-btn group-call-bar__mute" id="groupCallMuteBtn" aria-label="Mute microphone" title="Mute">
       <i data-lucide="mic" aria-hidden="true"></i>
+    </button>
+    <!-- Share Screen / Stop Sharing toggle — disabled (not hidden) while
+         someone ELSE is sharing, same "visible but non-interactive so the
+         reason is discoverable" posture as other disabled controls in this
+         app. See groupcalls.js's renderScreenShareButton. -->
+    <button type="button" class="icon-btn group-call-bar__screen-share" id="groupCallScreenShareBtn" aria-label="Share your screen" title="Share Screen">
+      <i data-lucide="screen-share" aria-hidden="true"></i>
     </button>
     <button type="button" class="icon-btn group-call-bar__people" id="groupCallPeopleBtn" aria-label="Show participants" title="Participants">
       <i data-lucide="users" aria-hidden="true"></i>
@@ -103,6 +118,22 @@
       </button>
     </div>
     <div class="group-call-panel__list" id="groupCallParticipantList"></div>
+  </div>
+
+  <!-- Remote screen-share viewer — the group equivalent of #callVideoPanel's
+       screen-share mode. Only ever shows the CURRENT sharer's track (group
+       screen sharing is one-at-a-time — see models.Call.screen_sharing_user_id) —
+       never this side's own outgoing preview, unlike the 1:1 panel's local
+       PIP, since watching yourself share in a group call adds nothing a
+       small "You are sharing" bar indicator doesn't already say. See
+       groupcalls.js's renderScreenPanel. -->
+  <div class="call-video-panel call-video-panel--screen-share group-call-screen-panel" id="groupCallScreenPanel" hidden>
+    <div class="call-video-panel__remote-wrap">
+      <video class="call-video-panel__remote" id="groupCallScreenVideo" autoplay playsinline></video>
+      <button type="button" class="icon-btn call-video-panel__expand-btn" id="groupCallScreenExpandBtn" aria-label="Expand screen" title="Expand screen">
+        <i data-lucide="maximize-2" aria-hidden="true"></i>
+      </button>
+    </div>
   </div>
 
   <!-- One <audio autoplay> per remote participant, created/removed by

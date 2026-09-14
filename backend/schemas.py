@@ -490,6 +490,17 @@ class CallActiveResponse(BaseModel):
 # (broadcast to every participant) rather than once per peer, since one
 # user's mute state is the same fact for everybody in the call, not a
 # pairwise negotiation like offer/answer/ice-candidate are.
+#
+# "screen-share-state" is ALSO sent broadcast (peer_user_id=None) for a
+# group call — routers/calls.py's post_group_signal allows it alongside
+# "mute-state" for that reason. Unlike mute-state, it is NOT the
+# authoritative "who is sharing" fact for a group call — that's
+# models.Call.screen_sharing_user_id, reconciled every poll via
+# GroupCallOut.screen_share (see start_group_screen_share/
+# stop_group_screen_share) — this signal exists purely so the OTHER
+# participants' viewers update the instant the sharer toggles, without
+# waiting out a poll tick, same as it already does for a 1:1 call's single
+# other party.
 CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state", "screen-share-state", "mute-state"}
 
 
@@ -605,6 +616,16 @@ class GroupCallParticipantOut(BaseModel):
         return _ensure_utc(value) if value is not None else None
 
 
+class GroupScreenShareOut(BaseModel):
+    """Who is currently sharing their screen in a group call — absent
+    (GroupCallOut.screen_share is None) when nobody is. Sourced straight
+    from models.Call.screen_sharing_user_id, the server-authoritative slot
+    services/call_service.start_group_screen_share enforces one-at-a-time —
+    never a client's own belief about who's sharing."""
+
+    user: UserOut
+
+
 class GroupCallOut(BaseModel):
     id: int
     conversation_id: int
@@ -614,6 +635,7 @@ class GroupCallOut(BaseModel):
     created_at: datetime
     ended_at: Optional[datetime] = None
     participants: List[GroupCallParticipantOut] = Field(default_factory=list)
+    screen_share: Optional[GroupScreenShareOut] = None
 
     @field_validator("created_at")
     @classmethod

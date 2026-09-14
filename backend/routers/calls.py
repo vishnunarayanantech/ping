@@ -385,6 +385,59 @@ def end_group_call(
     return GroupCallResponse(success=True, call=call_service.to_group_call_out(call))
 
 
+@router.post("/group/{call_id}/screen-share/start", response_model=GroupCallResponse)
+def start_group_screen_share(
+    call_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Claims the call's one screen-share slot for the caller — see
+    services/call_service.start_group_screen_share. Requires being an
+    actively JOINED participant (never just invited) of a still-active
+    call, same posture as post_group_signal below. A second participant's
+    request while someone else already holds the slot is rejected with 409
+    — that IS the "only one sharer at a time" enforcement; the frontend
+    disabling its own button is only a UI convenience on top of this."""
+    call = _get_group_call_or_404(db, call_id)
+    if call.status != call_service.GROUP_ACTIVE_STATUS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This group call has already ended")
+
+    participant = _require_group_access(db, call_id, current_user.id)
+    if participant.status != "joined":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You aren't in this call")
+
+    try:
+        call = call_service.start_group_screen_share(db, call, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    return GroupCallResponse(success=True, call=call_service.to_group_call_out(call))
+
+
+@router.post("/group/{call_id}/screen-share/stop", response_model=GroupCallResponse)
+def stop_group_screen_share(
+    call_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Releases the screen-share slot — only the current sharer may call
+    this (never another participant stopping someone else's share, which
+    isn't a feature this task asks for). A no-op success if nobody is
+    currently sharing at all, so the frontend can fire this unconditionally
+    from its own stop path without first checking who, if anyone, holds the
+    slot."""
+    call = _get_group_call_or_404(db, call_id)
+    participant = _require_group_access(db, call_id, current_user.id)
+    if participant.status != "joined":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You aren't in this call")
+
+    if call.screen_sharing_user_id is not None and call.screen_sharing_user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You aren't sharing your screen")
+
+    call = call_service.stop_group_screen_share(db, call)
+    return GroupCallResponse(success=True, call=call_service.to_group_call_out(call))
+
+
 @router.post("/group/{call_id}/signals", status_code=status.HTTP_201_CREATED)
 def post_group_signal(
     call_id: int,
@@ -407,7 +460,11 @@ def post_group_signal(
         target = call_service.get_group_call_participant(db, call_id, payload.peer_user_id)
         if not target or target.status != "joined":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That participant isn't in this call")
-    elif payload.message_type != "mute-state":
+    elif payload.message_type not in ("mute-state", "screen-share-state"):
+        # Both are broadcasts (peer_user_id=None) — see schemas.CALL_SIGNAL_TYPES's
+        # docstring for why screen-share-state joins mute-state here: one
+        # participant's share starting/stopping is the same fact for
+        # everybody in the call, not a pairwise negotiation.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="peer_user_id is required for this signal type")
 
     call_service.add_signal(db, call_id, current_user.id, payload.message_type, payload.payload, payload.peer_user_id)

@@ -48,6 +48,46 @@
  * automatically retries connectToParticipant for them, which is also how
  * "allow reconnection if practical" is satisfied with no separate retry
  * logic. Every other participant's connection is completely untouched.
+ *
+ * Screen sharing extends this same mesh: the one active sharer's captured
+ * track is added as a SECOND, independent sender on every peer connection
+ * (mirroring how calls.js's 1:1 screen share adds a second track to its one
+ * connection — see that module's own docstring) — never a second call, never
+ * a second signaling channel. Exactly one person may share at a time,
+ * enforced SERVER-SIDE (backend/models.Call.screen_sharing_user_id, via
+ * services/call_service.start_group_screen_share's 409-on-conflict) rather
+ * than trusted from any client's own belief — every participant's poll
+ * response (GroupCallOut.screen_share) carries that authoritative fact,
+ * reconciled into state.activeSharerId by syncScreenShareState, with the
+ * broadcast 'screen-share-state' signal (peer_user_id=None, same shape as
+ * 'mute-state' above) layered on top purely so the OTHER participants'
+ * viewers update the instant the sharer toggles instead of waiting out a
+ * poll tick.
+ *
+ * Per the task's explicit requirement, there is NO global negotiation flag
+ * for screen sharing — each entry in state.peers carries its OWN
+ * `negotiating` state (see negotiateWithPeer/settlePeerNegotiation), reused
+ * for BOTH a peer's very first (base call) offer/answer exchange and any
+ * later screen-share-add renegotiation to that SAME peer, with a one-deep
+ * queue (`pendingNegotiation`) so a second request arriving mid-negotiation
+ * waits for the first to settle instead of ever starting a second, invalid,
+ * concurrent local negotiation on one RTCPeerConnection. Only the ACTIVE
+ * SHARER's side ever initiates a screen-track-adding renegotiation (viewers
+ * never renegotiate anything themselves) — combined with the fixed
+ * shouldInitiateTo rule already governing the base offer, this means two
+ * sides never race to renegotiate the SAME peer connection at once, so
+ * (unlike calls.js's 1:1 screen share) no polite/impolite glare-rollback
+ * dance is needed here.
+ *
+ * Stopping a share never renegotiates (task allows "remove or replace" —
+ * this always replaces): replaceTrack(null) on every peer's kept sender,
+ * exactly like calls.js's own stopScreenShare, so a later re-share the same
+ * call reuses the same senders. A peer's sender/remote-screen-track live
+ * entirely on that peer's own state.peers entry (never a single shared
+ * variable) — see createPeerConnectionFor — so one peer connection failing
+ * mid-share (teardownPeer) only ever loses that ONE peer's copy of the
+ * shared screen; every other peer's is completely unaffected, satisfying
+ * the same per-peer failure isolation the base audio mesh already has.
  */
 const GroupCalls = (function ($) {
   'use strict';
@@ -79,11 +119,41 @@ const GroupCalls = (function ($) {
     // reconcileParticipants) — server-authoritative except connectionState,
     // which is this client's own WebRTC-level view of that peer.
     participants: new Map(),
-    // userId -> { pc, audioEl }. One entry per OTHER participant this side
-    // currently has (or is establishing) a live RTCPeerConnection with —
-    // never one per signal, never one shared connection for the whole call.
+    // userId -> { pc, pendingCandidates, negotiating, pendingNegotiation,
+    // pendingAnswerResolve, pendingAnswerReject, answerTimeout, screenSender,
+    // remoteScreenTrack, remoteScreenStream }. One entry per OTHER
+    // participant this side currently has (or is establishing) a live
+    // RTCPeerConnection with — never one per signal, never one shared
+    // connection for the whole call. See negotiateWithPeer for the
+    // per-peer (never global) negotiation fields, and the module docstring's
+    // screen-sharing paragraphs for screenSender/remoteScreenTrack/
+    // remoteScreenStream.
     peers: new Map(),
     lastSignalId: 0,
+    // --- Screen sharing (see module docstring) ---------------------------
+    // This side's own outgoing share, if any — entirely separate from
+    // localStream (the microphone) above, same "never coupled" posture
+    // calls.js's screen sharing already follows.
+    localScreenStream: null,
+    localScreenTrack: null,
+    sharingScreen: false,
+    // True from the moment the "Share Screen" click fires the REST claim
+    // request until getDisplayMedia resolves/rejects — guards a rapid
+    // double-click from firing two claim requests, and disables the button
+    // meanwhile (see renderScreenShareButton).
+    startingScreenShare: false,
+    // The server-authoritative current sharer's user id, or null — kept in
+    // sync with the polled GroupCallOut.screen_share (syncScreenShareState)
+    // and nudged early by the 'screen-share-state' broadcast signal/the
+    // first video ontrack from that peer, for a snappier UI than waiting out
+    // a full poll tick. NEVER itself the authorization boundary — that's
+    // always the backend's 409 on a conflicting claim.
+    activeSharerId: null,
+    // UI-only (mirrors calls.js's state.screenViewerExpanded): whether the
+    // remote screen-share viewer is showing enlarged. Independent per
+    // browser tab by construction — never signaled/persisted — so each
+    // participant's expand/collapse is already isolated with no extra code.
+    screenViewerExpanded: false,
     // Bumped on every teardown, same "invalidate in-flight requests for the
     // call that just ended" guard calls.js's pollGeneration provides.
     pollGeneration: 0,
@@ -114,6 +184,9 @@ const GroupCalls = (function ($) {
   let $panel, $panelList, $panelClose;
   let $audioContainer;
   let $modalOverlay, $modalHint, $modalList, $modalCancelBtn, $modalConfirmBtn, $modalCloseBtn;
+  // Screen sharing — see the module docstring's screen-sharing paragraphs.
+  let $screenShareBtn, $sharingIndicator, $sharingIndicatorText;
+  let $screenPanel, $screenVideo, $screenExpandBtn;
 
   function init(currentUser) {
     state.currentUser = currentUser;
@@ -138,6 +211,13 @@ const GroupCalls = (function ($) {
 
     $audioContainer = $('#groupCallAudioContainer');
 
+    $screenShareBtn = $('#groupCallScreenShareBtn');
+    $sharingIndicator = $('#groupCallSharingIndicator');
+    $sharingIndicatorText = $('#groupCallSharingIndicatorText');
+    $screenPanel = $('#groupCallScreenPanel');
+    $screenVideo = $('#groupCallScreenVideo');
+    $screenExpandBtn = $('#groupCallScreenExpandBtn');
+
     $modalOverlay = $('#groupCallStartModalOverlay');
     $modalHint = $('#groupCallStartModalHint');
     $modalList = $('#groupCallContactList');
@@ -152,6 +232,19 @@ const GroupCalls = (function ($) {
     $panelClose.on('click', togglePanel);
     $leaveBtn.on('click', leaveCall);
     $endBtn.on('click', endCallForEveryone);
+
+    $screenShareBtn.on('click', toggleScreenShare);
+    $screenExpandBtn.on('click', toggleScreenViewerExpanded);
+
+    // Only collapses an EXPANDED screen viewer — mirrors calls.js's own
+    // document-level Escape handler for its 1:1 viewer (never interferes
+    // with chat.js's own Escape handling for its emoji picker/edit-cancel,
+    // same reasoning calls.js's copy already documents).
+    $(document).on('keydown', function (e) {
+      if (e.key === 'Escape' && state.screenViewerExpanded) {
+        collapseScreenViewer();
+      }
+    });
 
     $modalCancelBtn.on('click', closeStartModal);
     $modalCloseBtn.on('click', closeStartModal);
@@ -263,6 +356,7 @@ const GroupCalls = (function ($) {
     }
 
     reconcileParticipants(call.participants);
+    syncScreenShareState(call.screen_share);
     render();
   }
 
@@ -491,6 +585,10 @@ const GroupCalls = (function ($) {
     state.phase = 'active';
     state.muted = false;
     state.dismissedCallId = null;
+    // A late joiner needs to know who's already sharing (if anyone) right
+    // away — set directly rather than through syncScreenShareState, since
+    // there's no "am I already sharing" belief yet to protect at this point.
+    state.activeSharerId = call.screen_share ? call.screen_share.user.id : null;
     reconcileParticipants(call.participants);
     startSpeakingDetection();
     render();
@@ -529,7 +627,26 @@ const GroupCalls = (function ($) {
 
   function createPeerConnectionFor(userId) {
     const pc = new RTCPeerConnection({ iceServers: state.iceServers || DEFAULT_ICE_SERVERS });
-    const peer = { pc: pc, pendingCandidates: [] };
+    const peer = {
+      pc: pc,
+      pendingCandidates: [],
+      // Per-peer negotiation state (task requirement: never a global flag)
+      // — see negotiateWithPeer/settlePeerNegotiation.
+      negotiating: false,
+      pendingNegotiation: null,
+      pendingAnswerResolve: null,
+      pendingAnswerReject: null,
+      answerTimeout: null,
+      // This side's OUTGOING screen-share sender on THIS connection, once
+      // added (see addScreenTrackToPeer) — independent per peer, task
+      // requirement.
+      screenSender: null,
+      // Whatever this peer is sending US as a screen share, if they're the
+      // current sharer — also independent per peer, so one peer's failure
+      // never touches another's copy (see module docstring).
+      remoteScreenTrack: null,
+      remoteScreenStream: null
+    };
     state.peers.set(userId, peer);
     setConnectionState(userId, 'connecting');
 
@@ -538,6 +655,26 @@ const GroupCalls = (function ($) {
     };
 
     pc.ontrack = function (e) {
+      if (e.track.kind === 'video') {
+        peer.remoteScreenTrack = e.track;
+        peer.remoteScreenStream = e.streams[0];
+        // The track can arrive before the broadcast signal/next poll
+        // catches up (e.g. right after a fresh renegotiation) — treat its
+        // mere arrival as "this peer is the sharer" so the viewer never
+        // waits on those when it already has the actual video.
+        if (state.activeSharerId == null) state.activeSharerId = userId;
+        e.track.onended = function () {
+          const p = state.peers.get(userId);
+          if (p && p.remoteScreenTrack === e.track) {
+            p.remoteScreenTrack = null;
+            p.remoteScreenStream = null;
+          }
+          renderScreenPanel();
+        };
+        renderScreenPanel();
+        renderBar();
+        return;
+      }
       ensureAudioEl(userId).srcObject = e.streams[0];
     };
 
@@ -552,7 +689,9 @@ const GroupCalls = (function ($) {
         // transient "failed" connection badge; the next poll's
         // reconcileParticipants sees them still joined and not in
         // state.peers anymore, and automatically retries — see the module
-        // docstring.
+        // docstring. If screen sharing was flowing over this one
+        // connection (either direction), teardownPeer below cleans that up
+        // too, without affecting any other peer's copy.
         setConnectionState(userId, 'failed');
         renderParticipants();
         teardownPeer(userId);
@@ -570,28 +709,37 @@ const GroupCalls = (function ($) {
 
   function connectToParticipant(userId) {
     if (userId === state.currentUser.id || state.peers.has(userId)) return;
-    const peer = createPeerConnectionFor(userId);
+    createPeerConnectionFor(userId);
     if (shouldInitiateTo(userId)) {
-      peer.pc.createOffer()
-        .then(function (offer) { return peer.pc.setLocalDescription(offer); })
-        .then(function () { sendSignal(userId, 'offer', { sdp: peer.pc.localDescription }); })
-        .catch(function () {
-          setConnectionState(userId, 'failed');
-          renderParticipants();
-          teardownPeer(userId);
-        });
+      negotiateWithPeer(userId, null).catch(function () {
+        setConnectionState(userId, 'failed');
+        renderParticipants();
+        teardownPeer(userId);
+      });
     }
   }
 
   function teardownPeer(userId) {
     const peer = state.peers.get(userId);
     if (!peer) return;
+    clearTimeout(peer.answerTimeout);
     peer.pc.onicecandidate = null;
     peer.pc.ontrack = null;
     peer.pc.oniceconnectionstatechange = null;
     peer.pc.close();
     state.peers.delete(userId);
     removeAudioEl(userId);
+    if (state.activeSharerId === userId) {
+      // Lost the connection carrying the current sharer's video — clear
+      // THIS side's viewer immediately rather than leaving a frozen last
+      // frame up; reconcileParticipants' retry (if they're still genuinely
+      // in the call) will re-establish it once the peer reconnects, and
+      // settlePeerNegotiation re-adds the screen track automatically once
+      // the sharer's side finishes that reconnection.
+      state.activeSharerId = null;
+      renderScreenPanel();
+      renderBar();
+    }
   }
 
   function flushPendingCandidates(peer) {
@@ -599,6 +747,107 @@ const GroupCalls = (function ($) {
     peer.pendingCandidates = [];
     candidates.forEach(function (candidate) {
       peer.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(function () {});
+    });
+  }
+
+  /**
+   * Runs an offer/answer exchange against peer `userId`'s OWN
+   * RTCPeerConnection — used for BOTH that peer's very first (base call)
+   * negotiation (`prepare` is null) AND, later, adding this side's screen
+   * track to it (`prepare` calls pc.addTrack — see addScreenTrackToPeer).
+   * Serialized entirely through THIS peer's own `negotiating` flag (task
+   * requirement: no global flag) — a second call while one is already in
+   * flight is queued as `pendingNegotiation` and retried the moment the
+   * first settles (see settlePeerNegotiation), rather than ever starting a
+   * second concurrent local negotiation on one RTCPeerConnection, which
+   * WebRTC itself would reject. Resolves once the matching answer has been
+   * received and applied, or rejects on failure/timeout — callers decide
+   * what "this one peer failed" means for them (base call: tear the peer
+   * down; screen add: just drop that one sender — see addScreenTrackToPeer).
+   */
+  function negotiateWithPeer(userId, prepare) {
+    const peer = state.peers.get(userId);
+    if (!peer) return Promise.resolve();
+
+    if (peer.negotiating) {
+      return new Promise(function (resolve, reject) {
+        peer.pendingNegotiation = function () {
+          negotiateWithPeer(userId, prepare).then(resolve, reject);
+        };
+      });
+    }
+
+    peer.negotiating = true;
+    if (prepare) prepare(peer);
+
+    return peer.pc.createOffer()
+      .then(function (offer) { return peer.pc.setLocalDescription(offer); })
+      .then(function () {
+        sendSignal(userId, 'offer', { sdp: peer.pc.localDescription });
+        return new Promise(function (resolve, reject) {
+          peer.pendingAnswerResolve = resolve;
+          peer.pendingAnswerReject = reject;
+          peer.answerTimeout = setTimeout(function () {
+            peer.pendingAnswerResolve = null;
+            peer.pendingAnswerReject = null;
+            reject(new Error('Renegotiation timed out'));
+          }, CALL_RENEGOTIATION_TIMEOUT_MS);
+        });
+      })
+      .finally(function () { settlePeerNegotiation(userId); });
+  }
+
+  /** Clears peer `userId`'s negotiation lock and either runs whatever got
+   * queued behind it, or — if nothing did — opportunistically adds this
+   * side's screen track to it when this side is currently sharing and
+   * hasn't added it to THIS peer yet (the late-joiner / reconnect case —
+   * see the module docstring). Called both when an offerer's answer lands
+   * (negotiateWithPeer's own .finally) and right after an answerer finishes
+   * sending ITS answer (handleSignal's 'offer' branch) — the same hook
+   * either way, since either side settling is equally "this peer's base
+   * call is now ready for a screen track if one's due". */
+  function settlePeerNegotiation(userId) {
+    const peer = state.peers.get(userId);
+    if (!peer) return;
+    peer.negotiating = false;
+    if (peer.pendingNegotiation) {
+      const next = peer.pendingNegotiation;
+      peer.pendingNegotiation = null;
+      next();
+      return;
+    }
+    if (state.sharingScreen && !peer.screenSender) {
+      addScreenTrackToPeer(userId);
+    }
+  }
+
+  /** Adds (or reuses) this side's OWN local screen track as a sender on
+   * peer `userId`'s connection — called once per peer when a share starts
+   * (looped over every currently-connected peer — see startScreenShare)
+   * and again, automatically, whenever a NEW peer connection settles while
+   * a share is already in progress (see settlePeerNegotiation). */
+  function addScreenTrackToPeer(userId) {
+    const peer = state.peers.get(userId);
+    if (!peer || !state.localScreenTrack) return;
+    if (peer.screenSender) {
+      // Already added earlier THIS call (e.g. re-sharing after an earlier
+      // stop) — reuse it via replaceTrack, no renegotiation needed, same
+      // optimization calls.js's 1:1 startScreenShare already uses.
+      peer.screenSender.replaceTrack(state.localScreenTrack).catch(function () {});
+      return;
+    }
+    negotiateWithPeer(userId, function (p) {
+      p.screenSender = p.pc.addTrack(state.localScreenTrack, state.localScreenStream);
+    }).catch(function () {
+      // This ONE peer's screen renegotiation failed — isolate it (task
+      // requirement): drop just this sender, leave the base audio
+      // connection to them (and every other peer's screen feed) completely
+      // untouched. That peer's viewer simply never gets the screen.
+      const p = state.peers.get(userId);
+      if (p && p.screenSender) {
+        try { p.pc.removeTrack(p.screenSender); } catch (e) { /* connection may already be closed */ }
+        p.screenSender = null;
+      }
     });
   }
 
@@ -610,10 +859,28 @@ const GroupCalls = (function ($) {
       return;
     }
 
+    if (signal.message_type === 'screen-share-state') {
+      // Not itself authoritative (see the module docstring) — just a
+      // snappier nudge than waiting out a poll tick; syncScreenShareState
+      // reconciles against the server truth every poll regardless.
+      if (signal.payload.enabled) {
+        state.activeSharerId = fromUserId;
+      } else if (state.activeSharerId === fromUserId) {
+        state.activeSharerId = null;
+      }
+      renderScreenPanel();
+      renderBar();
+      return;
+    }
+
     let peer = state.peers.get(fromUserId);
 
     if (signal.message_type === 'offer') {
       if (!peer) peer = createPeerConnectionFor(fromUserId);
+      // Guards against a locally-initiated negotiateWithPeer (e.g. a
+      // queued screen-add) starting a second, competing offer to this SAME
+      // peer while we're mid-answer — see negotiateWithPeer's own queueing.
+      peer.negotiating = true;
       peer.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp))
         .then(function () { return flushPendingCandidates(peer); })
         .then(function () { return peer.pc.createAnswer(); })
@@ -623,18 +890,29 @@ const GroupCalls = (function ($) {
           setConnectionState(fromUserId, 'failed');
           renderParticipants();
           teardownPeer(fromUserId);
-        });
+        })
+        .finally(function () { settlePeerNegotiation(fromUserId); });
       return;
     }
 
     if (signal.message_type === 'answer') {
       if (!peer) return; // stale — this side's own connection to them is already gone
+      const resolve = peer.pendingAnswerResolve;
+      const reject = peer.pendingAnswerReject;
+      clearTimeout(peer.answerTimeout);
+      peer.pendingAnswerResolve = null;
+      peer.pendingAnswerReject = null;
       peer.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp))
         .then(function () { return flushPendingCandidates(peer); })
-        .catch(function () {
-          setConnectionState(fromUserId, 'failed');
-          renderParticipants();
-          teardownPeer(fromUserId);
+        .then(function () { if (resolve) resolve(); })
+        .catch(function (err) {
+          if (reject) {
+            reject(err);
+          } else {
+            setConnectionState(fromUserId, 'failed');
+            renderParticipants();
+            teardownPeer(fromUserId);
+          }
         });
       return;
     }
@@ -718,6 +996,197 @@ const GroupCalls = (function ($) {
     });
     sendSignal(null, 'mute-state', { muted: state.muted }); // broadcast — see models.CallSignal's peer_user_id docstring
     render();
+  }
+
+  // --- Screen sharing (see module docstring) -------------------------------
+
+  function screenShareSupported() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  }
+
+  function toggleScreenShare() {
+    if (state.sharingScreen) {
+      stopScreenShare(false);
+    } else {
+      startScreenShare();
+    }
+  }
+
+  /** Only reachable while actually in the call and nobody else already
+   * holds the slot — see renderScreenShareButton's disabled state, which
+   * mirrors this same check for the UI. The REST claim happens BEFORE
+   * getDisplayMedia is even requested, so a losing race (someone else grabs
+   * the slot a moment earlier) never bothers the user with a screen-picker
+   * dialog for nothing. */
+  function startScreenShare() {
+    if (state.phase !== 'active' || !state.callId) return;
+    if (state.sharingScreen || state.startingScreenShare) return;
+    if (state.activeSharerId != null && state.activeSharerId !== state.currentUser.id) return;
+    if (!screenShareSupported()) {
+      Ping.showToast('Screen sharing is not supported in this browser.', 'error');
+      return;
+    }
+
+    state.startingScreenShare = true;
+    renderBar();
+    const myGeneration = state.pollGeneration;
+    const callId = state.callId;
+
+    Api.request({ url: '/calls/group/' + callId + '/screen-share/start', method: 'POST' })
+      .then(function () {
+        if (state.pollGeneration !== myGeneration) return Promise.reject({ superseded: true });
+
+        return navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+          .catch(function (mediaErr) {
+            // We already hold the server-side slot — release it before
+            // surfacing the error, so a cancelled picker never leaves
+            // everyone else locked out waiting for a share that's never
+            // coming.
+            Api.request({ url: '/calls/group/' + callId + '/screen-share/stop', method: 'POST' });
+            throw mediaErr;
+          });
+      })
+      .then(function (stream) {
+        if (state.pollGeneration !== myGeneration || state.phase !== 'active') {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          Api.request({ url: '/calls/group/' + callId + '/screen-share/stop', method: 'POST' });
+          return Promise.reject({ superseded: true });
+        }
+
+        state.localScreenStream = stream;
+        state.localScreenTrack = stream.getVideoTracks()[0];
+        // The task's mandatory case: the user picks "Stop sharing" from the
+        // BROWSER's own native screen-share indicator/UI rather than PING's
+        // button — this is the only way that's ever surfaced to the page.
+        state.localScreenTrack.onended = function () {
+          if (state.sharingScreen) stopScreenShare(true);
+        };
+        state.sharingScreen = true;
+        state.startingScreenShare = false;
+        state.activeSharerId = state.currentUser.id;
+        render();
+
+        // Add to every peer already connected; any peer that connects
+        // LATER while still sharing picks it up automatically via
+        // settlePeerNegotiation once its own base negotiation settles.
+        Array.from(state.peers.keys()).forEach(function (userId) { addScreenTrackToPeer(userId); });
+        sendSignal(null, 'screen-share-state', { enabled: true });
+      })
+      .catch(function (err) {
+        state.startingScreenShare = false;
+        if (err && err.superseded) { render(); return; }
+        handleScreenShareError(err);
+        render();
+      });
+  }
+
+  /**
+   * @param fromBrowser true when this is the browser's own native "Stop
+   *   sharing" control firing localScreenTrack.onended, rather than PING's
+   *   own button — task requirement: both must land in exactly the same
+   *   state.
+   */
+  function stopScreenShare(fromBrowser) {
+    if (!state.sharingScreen && !state.localScreenStream) return;
+    const callId = state.callId;
+    stopLocalScreenShareTracks();
+    state.activeSharerId = null;
+
+    if (callId) Api.request({ url: '/calls/group/' + callId + '/screen-share/stop', method: 'POST' });
+    sendSignal(null, 'screen-share-state', { enabled: false }); // broadcast — see models.CallSignal's peer_user_id docstring
+
+    render();
+    if (fromBrowser) Ping.showToast('Screen sharing stopped', 'success');
+  }
+
+  /** Stops and releases this side's own outgoing screen capture, and clears
+   * every peer's sender via replaceTrack(null) — no renegotiation needed to
+   * stop (task allows "remove or replace"; this always replaces, mirroring
+   * calls.js's 1:1 stopScreenShare so a later re-share this same call can
+   * reuse the same senders). Deliberately does NOT touch state.peers'
+   * membership or state.activeSharerId itself — callers (stopScreenShare,
+   * syncScreenShareState) decide what those should become. */
+  function stopLocalScreenShareTracks() {
+    if (state.localScreenTrack) {
+      state.localScreenTrack.onended = null;
+      state.localScreenTrack.stop();
+    }
+    if (state.localScreenStream) {
+      state.localScreenStream.getTracks().forEach(function (t) { t.stop(); }); // releases the OS-level screen-capture indicator
+    }
+    state.localScreenStream = null;
+    state.localScreenTrack = null;
+    state.sharingScreen = false;
+    state.peers.forEach(function (peer) {
+      if (peer.screenSender) peer.screenSender.replaceTrack(null).catch(function () {});
+    });
+  }
+
+  function handleScreenShareError(err) {
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'AbortError') {
+      // The user dismissed/cancelled the browser's own screen-picker dialog
+      // — not a failure, and explicitly NOT a call failure — the group call
+      // just continues exactly as it was.
+      Ping.showToast('Screen sharing cancelled', 'error');
+      return;
+    }
+    if (name === 'NotFoundError') {
+      Ping.showToast('No screen or window is available to share.', 'error');
+      return;
+    }
+    if (name === 'NotReadableError') {
+      Ping.showToast('Your screen could not be captured — it may be blocked by another application.', 'error');
+      return;
+    }
+    if (name === 'OverconstrainedError') {
+      Ping.showToast('Screen sharing is not supported with the requested settings.', 'error');
+      return;
+    }
+    if (err && err.responseJSON && err.responseJSON.message) {
+      // The REST claim's own failure — e.g. the 409 "someone else is
+      // already sharing" a losing race hit (see startScreenShare).
+      Ping.showToast(err.responseJSON.message, 'error');
+      return;
+    }
+    Ping.showToast('Unable to start screen sharing.', 'error');
+  }
+
+  /** Reconciles state.activeSharerId against the server-authoritative
+   * GroupCallOut.screen_share carried on every poll — the fallback for
+   * whatever the (best-effort, unordered) 'screen-share-state' broadcast
+   * signal missed: a late joiner who wasn't there for the original
+   * broadcast, a dropped signal, or simply the very first tick after
+   * joining. Deliberately never overrides THIS side's own belief about
+   * whether IT is sharing (state.sharingScreen, driven only by explicit
+   * user action / the browser's native stop control) — a stale server read
+   * naming US as the sharer right after our own stop request hasn't been
+   * processed yet should never make the UI flicker back to "sharing". */
+  function syncScreenShareState(screenShare) {
+    const serverSharerId = screenShare ? screenShare.user.id : null;
+    if (state.sharingScreen || serverSharerId === state.currentUser.id) return;
+    if (serverSharerId === state.activeSharerId) return;
+    state.activeSharerId = serverSharerId;
+    renderScreenPanel();
+    renderBar();
+  }
+
+  // --- Screen viewer expand/collapse (UI-only) -----------------------------
+  // Mirrors calls.js's own toggleScreenViewerExpanded/collapseScreenViewer —
+  // pure local view-size state, never signaled/persisted, so each
+  // participant's browser expands/collapses completely independently of
+  // every other's (task requirement).
+
+  function toggleScreenViewerExpanded() {
+    if (state.activeSharerId == null) return;
+    state.screenViewerExpanded = !state.screenViewerExpanded;
+    renderScreenPanel();
+  }
+
+  function collapseScreenViewer() {
+    if (!state.screenViewerExpanded) return;
+    state.screenViewerExpanded = false;
+    renderScreenPanel();
   }
 
   // --- Speaking detection (local only) -------------------------------------
@@ -808,6 +1277,7 @@ const GroupCalls = (function ($) {
   function teardownToIdle(message) {
     Array.from(state.peers.keys()).forEach(teardownPeer);
     cleanupLocalMedia();
+    stopLocalScreenShareTracks();
     stopSpeakingDetection();
 
     state.pollGeneration++;
@@ -819,6 +1289,9 @@ const GroupCalls = (function ($) {
     state.muted = false;
     state.panelOpen = false;
     state.lastSignalId = 0;
+    state.activeSharerId = null;
+    state.startingScreenShare = false;
+    state.screenViewerExpanded = false;
 
     render();
     scheduleNextPoll();
@@ -852,6 +1325,7 @@ const GroupCalls = (function ($) {
     renderBar();
     renderPanelVisibility();
     renderParticipants();
+    renderScreenPanel();
   }
 
   function renderBanner() {
@@ -875,7 +1349,93 @@ const GroupCalls = (function ($) {
 
     $endBtn.prop('hidden', state.creatorId !== state.currentUser.id);
 
+    renderScreenShareButton();
+    renderSharingIndicator();
+
     Ping.renderIcons($bar[0]);
+  }
+
+  function renderScreenShareButton() {
+    if (!screenShareSupported()) {
+      $screenShareBtn.prop('hidden', true);
+      return;
+    }
+    $screenShareBtn.prop('hidden', false);
+    // Disabled while starting (guards a double-click) or while someone ELSE
+    // already holds the slot — task requirement. Never disabled for the
+    // current sharer themselves; clicking again is how they stop.
+    const disabled = state.startingScreenShare ||
+      (state.activeSharerId != null && state.activeSharerId !== state.currentUser.id);
+    $screenShareBtn
+      .prop('disabled', disabled)
+      .toggleClass('is-active', state.sharingScreen)
+      .attr('aria-label', state.sharingScreen ? 'Stop sharing your screen' : 'Share your screen')
+      .attr('title', state.sharingScreen ? 'Stop Sharing' : 'Share Screen')
+      .find('i')
+      .attr('data-lucide', state.sharingScreen ? 'screen-share-off' : 'screen-share');
+  }
+
+  function renderSharingIndicator() {
+    const sharerId = state.activeSharerId;
+    if (sharerId == null) {
+      $sharingIndicator.prop('hidden', true);
+      return;
+    }
+    const isMe = sharerId === state.currentUser.id;
+    const participant = state.participants.get(sharerId);
+    const name = isMe ? 'You' : (participant ? participant.user.name : 'Someone');
+    $sharingIndicatorText.text(isMe ? 'You are sharing your screen' : name + ' is sharing their screen');
+    $sharingIndicator.prop('hidden', false);
+  }
+
+  function renderScreenExpandButton(expanded) {
+    $screenExpandBtn
+      .attr('aria-label', expanded ? 'Collapse screen' : 'Expand screen')
+      .attr('title', expanded ? 'Collapse screen' : 'Expand screen')
+      .find('i')
+      .attr('data-lucide', expanded ? 'minimize-2' : 'maximize-2');
+    Ping.renderIcons($screenExpandBtn[0]);
+  }
+
+  /** The remote screen-share viewer — mirrors calls.js's renderVideoPanel
+   * for the screen-share case, minus the local PIP (a group call never
+   * shows this side's own outgoing preview here — see the markup's
+   * comment). Single idempotent entry point: safe to call from anywhere
+   * state.activeSharerId or the sharer's track availability changes
+   * (ontrack, a signal, a poll, expand/collapse, teardown). */
+  function renderScreenPanel() {
+    const sharerId = state.activeSharerId;
+    const show = state.phase === 'active' && sharerId != null;
+    $screenPanel.prop('hidden', !show);
+
+    if (!show) {
+      if (state.screenViewerExpanded) {
+        state.screenViewerExpanded = false;
+        document.body.classList.remove('call-screen-expanded-lock');
+      }
+      $screenPanel.removeClass('call-video-panel--expanded');
+      if ($screenVideo[0].srcObject) $screenVideo[0].srcObject = null;
+      return;
+    }
+
+    const expanded = state.screenViewerExpanded;
+    $screenPanel.toggleClass('call-video-panel--expanded', expanded);
+    document.body.classList.toggle('call-screen-expanded-lock', expanded);
+    renderScreenExpandButton(expanded);
+
+    const peer = state.peers.get(sharerId);
+    const trackLive = !!(peer && peer.remoteScreenTrack && peer.remoteScreenTrack.readyState === 'live');
+    // sharerId can be the CURRENT USER (this side is the one sharing) —
+    // there's no peer entry for yourself, and no local preview to show
+    // here (see the markup's comment), so the video element just stays
+    // empty in that case; the bar's sharing indicator/badge already covers
+    // "you are sharing".
+    if (trackLive) {
+      const stream = peer.remoteScreenStream;
+      if ($screenVideo[0].srcObject !== stream) $screenVideo[0].srcObject = stream;
+    } else if ($screenVideo[0].srcObject) {
+      $screenVideo[0].srcObject = null;
+    }
   }
 
   function renderPanelVisibility() {
@@ -926,6 +1486,7 @@ const GroupCalls = (function ($) {
         }
         if (p.muted) statusParts.push('Muted');
       }
+      if (p.user.id === state.activeSharerId) statusParts.push('Sharing screen');
       $row.append($('<span>', { class: 'group-call-participant__status', text: statusParts.join(' · ') }));
 
       if (!isMe && p.muted) {

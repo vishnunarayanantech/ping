@@ -233,6 +233,27 @@ class Call(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
+    # Group calls only (scope="group") — the ONE participant currently
+    # sharing their screen, or NULL if nobody is. This is the same kind of
+    # server-authoritative state CallParticipant.status already is for the
+    # roster: every participant's poll response (see
+    # services/call_service.to_group_call_out's `screen_share` field)
+    # reconciles against THIS column, never trusting any one client's own
+    # "am I sharing" belief. One-at-a-time is enforced by
+    # services/call_service.start_group_screen_share (a ValueError, turned
+    # into a 409, if this is already set to someone ELSE) — the actual
+    # authorization boundary; the frontend disabling its own Share Screen
+    # button while someone else shares is just a UI convenience on top of
+    # this. Cleared on an explicit stop, on that participant leaving
+    # (voluntarily or via the pagehide/keepalive path — see
+    # leave_group_call), and unconditionally when the call ends for everyone
+    # (see end_group_call) — so it can never keep pointing at someone no
+    # longer in the call. Always NULL for scope="direct" rows: a 1:1 call's
+    # screen sharing has no "who out of several" ambiguity to arbitrate
+    # server-side, so it stays tracked entirely client-side via the existing
+    # 'screen-share-state' signal (see schemas.CALL_SIGNAL_TYPES's
+    # docstring).
+    screen_sharing_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     # Read-only convenience relationships (no cascade, no back_populates) so
     # services/call_service.to_call_out can build the CallOut's nested
@@ -244,6 +265,10 @@ class Call(Base):
     # reasoning as caller/receiver above; participants are only ever written
     # through services/call_service's group-call functions.
     participants = relationship("CallParticipant", back_populates="call")
+    # Read-only convenience relationship for screen_sharing_user_id above,
+    # same "avoid a second query in to_group_call_out" reasoning as
+    # caller/receiver.
+    screen_sharing_user = relationship("User", foreign_keys=[screen_sharing_user_id])
 
 
 class CallSignal(Base):

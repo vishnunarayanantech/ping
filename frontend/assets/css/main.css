@@ -2789,6 +2789,58 @@ p {
   color: var(--color-error);
 }
 
+/* Group screen sharing — extends the group-call-bar/floating-panel pattern
+   above with the same is-active/disabled conventions
+   .active-call-bar__screen-share already established for 1:1 calls. */
+.group-call-bar__sharing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  flex-shrink: 1;
+  min-width: 0;
+  padding: 0.25em 0.65em;
+  border-radius: var(--radius-full);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-call-bar__sharing-indicator svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.group-call-bar__sharing-indicator span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-call-bar__screen-share.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.group-call-bar__screen-share:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The group call's remote screen-share viewer reuses .call-video-panel's
+   sizing/letterboxing/expand-collapse wholesale (see the markup's class
+   list) — this just repositions it below .group-call-bar instead of
+   .active-call-bar, which .call-video-panel's own top:64px already assumes
+   is available (both bars are the same 52px height, so no override is
+   actually needed; this rule exists purely to document that rather than to
+   change anything). */
+.group-call-screen-panel {
+  top: 64px;
+}
+
 /* Start-group-call modal's contact picker — same list/row shape as
    .forward-modal__list/.forward-conversation-item, just with a real
    checkbox (multi-select) instead of a single-select circle. */

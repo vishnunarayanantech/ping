@@ -130,6 +130,15 @@ def _add_missing_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE call_signaling ADD COLUMN peer_user_id INTEGER REFERENCES users(id)"))
 
+    # group screen sharing: same trick for calls.screen_sharing_user_id.
+    # Every existing call row predates group screen sharing, so NULL here
+    # (see models.Call's docstring — "nobody is sharing") is exactly correct
+    # with no backfill needed.
+    call_columns = {col["name"] for col in inspector.get_columns("calls")}
+    if "screen_sharing_user_id" not in call_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE calls ADD COLUMN screen_sharing_user_id INTEGER REFERENCES users(id)"))
+
 
 _add_missing_columns()
 

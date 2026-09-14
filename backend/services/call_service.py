@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from config import CALL_RING_TIMEOUT_SECONDS, GROUP_CALL_MAX_PARTICIPANTS
 from models import Call, CallParticipant, CallSignal, ConversationMember
-from schemas import CallOut, GroupCallOut, GroupCallParticipantOut, UserOut
+from schemas import CallOut, GroupCallOut, GroupCallParticipantOut, GroupScreenShareOut, UserOut
 
 # A call is "in progress" — busy-checking and the incoming-call poll both key
 # off this. Every other status ("rejected", "cancelled", "missed", "busy",
@@ -294,6 +294,12 @@ def leave_group_call(db: Session, call: Call, participant: CallParticipant) -> C
     otherwise restricted to the creator — see end_group_call)."""
     participant.status = "left"
     participant.left_at = datetime.now(timezone.utc)
+    if call.screen_sharing_user_id == participant.user_id:
+        # The leaver was mid-share (voluntary leave, or the pagehide/
+        # keepalive path — see routers/calls.py's leave_group_call route) —
+        # never leave the slot pointing at someone no longer in the call;
+        # see models.Call.screen_sharing_user_id's docstring.
+        call.screen_sharing_user_id = None
     db.flush()
 
     still_joined = (
@@ -322,6 +328,7 @@ def end_group_call(db: Session, call: Call) -> Call:
     now = datetime.now(timezone.utc)
     call.status = GROUP_ENDED_STATUS
     call.ended_at = now
+    call.screen_sharing_user_id = None  # the call is ending entirely — nothing left to point at
     (
         db.query(CallParticipant)
         .filter(CallParticipant.call_id == call.id)
@@ -330,6 +337,38 @@ def end_group_call(db: Session, call: Call) -> Call:
     )
     db.commit()
     db.refresh(call)
+    return call
+
+
+def start_group_screen_share(db: Session, call: Call, user_id: int) -> Call:
+    """Claims the call's one screen-share slot for `user_id` — the
+    authoritative state every participant's next poll (to_group_call_out's
+    `screen_share` field) reconciles against, not just a same-shape signal
+    like mute-state (see models.Call.screen_sharing_user_id's docstring).
+    Idempotent if `user_id` already holds it (e.g. a retried request);
+    raises ValueError — turned into a 409 by routers/calls.py — if someone
+    ELSE currently does. This IS the one-at-a-time enforcement; the
+    frontend disabling its own Share Screen button while someone else
+    shares is just a UI convenience on top of it."""
+    if call.screen_sharing_user_id is not None and call.screen_sharing_user_id != user_id:
+        raise ValueError("Someone else is already sharing their screen")
+    call.screen_sharing_user_id = user_id
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def stop_group_screen_share(db: Session, call: Call) -> Call:
+    """Clears the active sharer unconditionally — routers/calls.py has
+    already checked the caller either IS that sharer or that this is the
+    leave/end path clearing it on someone else's behalf (see
+    leave_group_call/end_group_call above), so this function just performs
+    the write. A no-op (no commit) if nobody is currently sharing, so
+    calling it twice in a row is harmless."""
+    if call.screen_sharing_user_id is not None:
+        call.screen_sharing_user_id = None
+        db.commit()
+        db.refresh(call)
     return call
 
 
@@ -362,6 +401,11 @@ def to_group_call_out(call: Call) -> GroupCallOut:
         )
         for p in call.participants
     ]
+    screen_share = (
+        GroupScreenShareOut(user=UserOut.model_validate(call.screen_sharing_user))
+        if call.screen_sharing_user_id is not None
+        else None
+    )
     return GroupCallOut(
         id=call.id,
         conversation_id=call.conversation_id,
@@ -371,4 +415,5 @@ def to_group_call_out(call: Call) -> GroupCallOut:
         created_at=call.created_at,
         ended_at=call.ended_at,
         participants=participants,
+        screen_share=screen_share,
     )
