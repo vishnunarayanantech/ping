@@ -12,7 +12,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from config import CALL_RING_TIMEOUT_SECONDS, GROUP_CALL_MAX_PARTICIPANTS
+from config import CALL_RING_TIMEOUT_SECONDS, GROUP_CALL_ABANDON_TIMEOUT_SECONDS, GROUP_CALL_MAX_PARTICIPANTS
 from models import Call, CallParticipant, CallSignal, ConversationMember
 from schemas import CallOut, GroupCallOut, GroupCallParticipantOut, GroupScreenShareOut, UserOut
 
@@ -243,7 +243,7 @@ def create_group_call(
     db.add(call)
     db.flush()  # assigns call.id without committing yet, so participant rows below can reference it
 
-    db.add(CallParticipant(call_id=call.id, user_id=creator_id, status="joined", joined_at=now))
+    db.add(CallParticipant(call_id=call.id, user_id=creator_id, status="joined", joined_at=now, last_activity_at=now))
     for user_id in invitee_ids:
         db.add(CallParticipant(call_id=call.id, user_id=user_id, status="invited"))
 
@@ -354,26 +354,42 @@ def get_active_group_call_for_user(db: Session, user_id: int) -> Optional[Call]:
 
 
 def join_group_call(db: Session, call: Call, participant: CallParticipant) -> Call:
+    now = datetime.now(timezone.utc)
     participant.status = "joined"
-    participant.joined_at = datetime.now(timezone.utc)
+    participant.joined_at = now
+    participant.last_activity_at = now
     db.commit()
     db.refresh(call)
     return call
 
 
-def leave_group_call(db: Session, call: Call, participant: CallParticipant) -> Call:
-    """Marks just this one participant as left — the call stays "active" for
-    everyone else, UNLESS this was the last "joined" participant, in which
-    case the call auto-ends (see models.CallParticipant's docstring: nothing
-    else would ever end an abandoned group call otherwise, since ending is
-    otherwise restricted to the creator — see end_group_call)."""
+def touch_group_call_participant(db: Session, participant: CallParticipant) -> None:
+    """Bumps last_activity_at to "now" — called once per active-call poll
+    (see routers/calls.py's get_group_call) as this participant's own "I'm
+    still here" signal, the thing apply_group_call_abandonment below checks
+    against. Never called for a merely-"invited" participant — an
+    un-joined invitee isn't occupying a live connection the way a "joined"
+    one is, so it has no liveness to track."""
+    participant.last_activity_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+def _mark_participant_left(db: Session, call: Call, participant: CallParticipant, now: datetime) -> None:
+    """Shared by leave_group_call (one explicit departure) and
+    apply_group_call_abandonment (a lazy sweep over possibly several stale
+    participants) — flips one participant to "left", releases their screen-
+    share slot if they held it, and auto-ends the call if nobody's left
+    "joined" (see models.CallParticipant's docstring: nothing else would
+    ever end an abandoned group call otherwise, since ending is otherwise
+    restricted to the creator — see end_group_call). Does NOT commit — the
+    caller commits once after marking everyone in this pass, and decides
+    whether to db.refresh(call) afterward."""
     participant.status = "left"
-    participant.left_at = datetime.now(timezone.utc)
+    participant.left_at = now
     if call.screen_sharing_user_id == participant.user_id:
-        # The leaver was mid-share (voluntary leave, or the pagehide/
-        # keepalive path — see routers/calls.py's leave_group_call route) —
-        # never leave the slot pointing at someone no longer in the call;
-        # see models.Call.screen_sharing_user_id's docstring.
+        # The leaver was mid-share (voluntary leave, or lazily reaped after
+        # going stale) — never leave the slot pointing at someone no longer
+        # in the call; see models.Call.screen_sharing_user_id's docstring.
         call.screen_sharing_user_id = None
     db.flush()
 
@@ -385,7 +401,47 @@ def leave_group_call(db: Session, call: Call, participant: CallParticipant) -> C
     )
     if not still_joined:
         call.status = GROUP_ENDED_STATUS
-        call.ended_at = datetime.now(timezone.utc)
+        call.ended_at = now
+
+
+def leave_group_call(db: Session, call: Call, participant: CallParticipant) -> Call:
+    """Marks just this one participant as left — the call stays "active" for
+    everyone else, UNLESS this was the last "joined" participant, in which
+    case the call auto-ends. See _mark_participant_left for the shared
+    logic — this is its "one explicit departure, commit once" caller."""
+    _mark_participant_left(db, call, participant, datetime.now(timezone.utc))
+    db.commit()
+    db.refresh(call)
+    return call
+
+
+def apply_group_call_abandonment(db: Session, call: Call) -> Call:
+    """
+    Lazily flips any "joined" participant whose last_activity_at has gone
+    stale past config.GROUP_CALL_ABANDON_TIMEOUT_SECONDS to "left" —
+    checked on every read of an active group call (GET /calls/group/{id},
+    GET /calls/group/active), the same "no background job or scheduler
+    needed" pattern apply_ring_timeout already established for a direct
+    call's ring timeout. This is what eventually frees a roster slot from
+    someone who genuinely closed their tab: a page refresh no longer POSTs
+    .../leave on unload (see groupcalls.js's module docstring), so without
+    this, an abandoned "joined" row would otherwise sit there forever.
+    Idempotent and a no-op (no commit) if nothing is stale.
+    """
+    if call.status != GROUP_ACTIVE_STATUS:
+        return call
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=GROUP_CALL_ABANDON_TIMEOUT_SECONDS)
+    stale = [
+        p for p in call.participants
+        if p.status == "joined" and (p.last_activity_at is None or _as_utc(p.last_activity_at) < cutoff)
+    ]
+    if not stale:
+        return call
+
+    now = datetime.now(timezone.utc)
+    for participant in stale:
+        _mark_participant_left(db, call, participant, now)
 
     db.commit()
     db.refresh(call)

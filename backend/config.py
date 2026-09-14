@@ -96,3 +96,15 @@ def get_ice_servers():
 # need an SFU (a media server every participant sends ONE stream to, which
 # then fans it out) instead of this mesh — out of scope for this iteration.
 GROUP_CALL_MAX_PARTICIPANTS = int(os.getenv("GROUP_CALL_MAX_PARTICIPANTS", "6"))
+
+# How long a "joined" participant's last_activity_at (touched on every active-
+# call poll — see routers/calls.py's get_group_call) can go stale before
+# services/call_service.apply_group_call_abandonment lazily treats them as
+# having genuinely abandoned the call (tab closed for good) rather than just
+# mid-refresh, and frees their roster slot. A page refresh no longer calls
+# .../leave on unload (see groupcalls.js's module docstring — refresh and a
+# real close are indistinguishable at the browser-event level), so this is
+# what eventually reclaims a slot from someone who really did leave without
+# clicking Leave. 30s comfortably exceeds a normal reload-and-reconnect cycle
+# (typically well under 5s).
+GROUP_CALL_ABANDON_TIMEOUT_SECONDS = int(os.getenv("GROUP_CALL_ABANDON_TIMEOUT_SECONDS", "30"))

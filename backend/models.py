@@ -321,13 +321,30 @@ class CallParticipant(Base):
     status starts "invited" (set for everyone except the creator when
     services/call_service.create_group_call creates the call — the creator's
     own row starts "joined"), moves to "joined" when that user actually
-    calls POST /calls/group/{id}/join, and to "left" when they leave (either
-    voluntarily via POST .../leave, or because the creator ended the call
-    for everyone via POST .../end). There's no "declined" — an invited user
-    who never joins just stays "invited" for the life of the call; nothing
-    times that out the way a direct call's "ringing" does, since a group
-    call has no single person whose non-answer should end it for everyone
-    else.
+    calls POST /calls/group/{id}/join, and to "left" when they leave
+    (voluntarily via POST .../leave, because the creator ended the call for
+    everyone via POST .../end, or because
+    services/call_service.apply_group_call_abandonment lazily reaped a
+    "joined" row whose last_activity_at went stale — see that column's own
+    docstring). There's no "declined" — an invited user who never joins just
+    stays "invited" for the life of the call; nothing times that out the way
+    a direct call's "ringing" does, since a group call has no single person
+    whose non-answer should end it for everyone else.
+
+    last_activity_at is bumped to "now" every time this participant's own
+    client proves it's still around — set on join (create_group_call/
+    join_group_call) and touched on every active-call poll (GET
+    /calls/group/{id}, once _require_group_access confirms they're still a
+    live participant). A page REFRESH is deliberately never treated as
+    leaving (there's no unload handler calling .../leave any more — see
+    groupcalls.js's module docstring) since refresh and a real tab-close are
+    indistinguishable at the browser-event level; instead, this timestamp
+    going stale past config.GROUP_CALL_ABANDON_TIMEOUT_SECONDS is what
+    apply_group_call_abandonment uses to eventually free a truly-abandoned
+    roster slot, the same "lazy check on read, no scheduler needed" pattern
+    services/call_service.apply_ring_timeout already established for a
+    direct call's ring timeout. NULL only ever transiently, between a row's
+    creation and its first join/poll.
     """
 
     __tablename__ = "call_participants"
@@ -339,6 +356,7 @@ class CallParticipant(Base):
     status = Column(String, nullable=False, default="invited", index=True)
     joined_at = Column(DateTime(timezone=True), nullable=True)
     left_at = Column(DateTime(timezone=True), nullable=True)
+    last_activity_at = Column(DateTime(timezone=True), nullable=True)
 
     call = relationship("Call", back_populates="participants")
     user = relationship("User")

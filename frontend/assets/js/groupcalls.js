@@ -88,6 +88,30 @@
  * mid-share (teardownPeer) only ever loses that ONE peer's copy of the
  * shared screen; every other peer's is completely unaffected, satisfying
  * the same per-peer failure isolation the base audio mesh already has.
+ *
+ * Surviving a page refresh: a reload destroys this whole module's JS state
+ * (every RTCPeerConnection, localStream, everything in `state`) — that part
+ * is unavoidable. What's NOT unavoidable is treating that reload as
+ * LEAVING the call: there is deliberately no pagehide/beforeunload/
+ * visibilitychange handler here (an earlier version had one that POSTed
+ * .../leave on pagehide, but that event fires identically on a real tab
+ * close and on a plain refresh — there's no way to tell those apart at the
+ * browser-event level, so "detect a refresh" was never the right fix).
+ * Instead, GroupCalls.init()'s very first poll (see pollForIncoming) checks
+ * whether the server still lists this user's OWN participant row as
+ * 'joined' — true whenever this is a reload mid-call, since nothing set it
+ * to 'left' — and if so calls resumeActiveCall() instead of showing the
+ * incoming-invitation banner: re-acquire the mic, re-POST the (idempotent)
+ * .../join, then hand off to the SAME enterActiveCall() a fresh join
+ * already uses. From there the mesh rebuilds itself with no new code at
+ * all: reconcileParticipants already calls connectToParticipant for every
+ * peer still listed 'joined' that this side has no live RTCPeerConnection
+ * for — originally built for ICE-failure retry, and it turns out that's
+ * exactly what "reconnect after reload" needs too. A participant who
+ * genuinely closes their tab for good (not a refresh) is instead caught
+ * server-side, lazily, once their last_activity_at goes stale past
+ * config.GROUP_CALL_ABANDON_TIMEOUT_SECONDS — see
+ * services/call_service.apply_group_call_abandonment.
  */
 const GroupCalls = (function ($) {
   'use strict';
@@ -101,10 +125,18 @@ const GroupCalls = (function ($) {
   const state = {
     currentUser: null,
     iceServers: null,
-    // idle | incoming | active
+    // idle | incoming | resuming | active
     // "incoming": invited to a call, banner shown, not yet joined (no local
     // media acquired yet — same "never touch the mic before the user acts"
     // rule calls.js follows for an incoming 1:1 call).
+    // "resuming": transitional only, set synchronously by resumeActiveCall
+    // right before its own acquireLocalMedia() — the server already lists
+    // us 'joined' (a page reload, never an invitation), so there's no
+    // banner for this one; it exists purely so isActive() still reports
+    // true during that async gap (blocking a concurrent 1:1/group call
+    // start) without rendering a bar/panel before there's anything real to
+    // show one for. Always resolves to 'active' (enterActiveCall) or back
+    // to 'idle' (resume failed — see resumeActiveCall's catch).
     // "active": joined (or the creator, who auto-joins) — mic acquired,
     // bar + participant panel shown.
     phase: 'idle',
@@ -288,7 +320,13 @@ const GroupCalls = (function ($) {
       .done(function (response) { state.iceServers = response.ice_servers; })
       .fail(function () { state.iceServers = DEFAULT_ICE_SERVERS; });
 
-    scheduleNextPoll();
+    // Polled immediately rather than merely scheduled — this is also the
+    // "was I already joined to an active call before this reload?" resume
+    // check (see pollForIncoming), so a refreshed participant shouldn't
+    // have to wait out one full GROUP_CALL_POLL_INTERVAL_IDLE_MS tick
+    // before reconnecting. Same "don't make the user wait" reasoning
+    // showIncoming/joinIncoming already use for their own pollCallState().
+    pollForIncoming();
   }
 
   function rtcSupported() {
@@ -332,6 +370,19 @@ const GroupCalls = (function ($) {
       .done(function (response) {
         if (state.phase !== 'idle') return; // a call started/joined locally in the meantime
         if (response.call && response.call.id !== state.dismissedCallId) {
+          // Tell an actual incoming invitation apart from "I was already
+          // joined to this before the page reloaded" — the server still
+          // lists a resuming participant's own row as 'joined' (see
+          // models.CallParticipant.last_activity_at's docstring: refresh no
+          // longer forces a leave), so no banner/click is needed for them,
+          // unlike someone freshly invited (still 'invited', never joined).
+          const myEntry = response.call.participants.filter(function (p) {
+            return p.user.id === state.currentUser.id;
+          })[0];
+          if (myEntry && myEntry.status === 'joined') {
+            resumeActiveCall(response.call);
+            return; // resumeActiveCall's own poll (via enterActiveCall) takes over from here
+          }
           showIncoming(response.call);
           return; // pollCallState takes over from here
         }
@@ -790,6 +841,74 @@ const GroupCalls = (function ($) {
     startSpeakingDetection();
     render();
     pollCallState();
+  }
+
+  /**
+   * Reconnects to a group call this side was already 'joined' to before the
+   * page reloaded — found by pollForIncoming's own resume check (the server
+   * never force-left this participant on refresh; see the module
+   * docstring). Deliberately skips the incoming banner entirely: unlike a
+   * fresh invitation, there's nothing to ask the user to accept, they were
+   * already in this call a moment ago. Mirrors joinIncoming's async chain
+   * (acquire mic -> POST .../join -> enterActiveCall), but entered
+   * automatically rather than from a click, and re-POSTing .../join is
+   * simply idempotent here rather than a first-time join.
+   */
+  function resumeActiveCall(call) {
+    if (state.phase !== 'idle') return; // something else already claimed the phase in the meantime — next idle tick retries
+    if (Calls.isActive()) return; // a 1:1 call is somehow already active — next idle tick retries once it ends
+    if (!rtcSupported()) return; // silent — this is a background resume, not a user action; the server-side abandonment timeout will eventually reap this participant if they can truly never reconnect
+
+    state.callId = call.id;
+    state.conversationId = call.conversation_id;
+    state.creatorId = call.creator.id;
+    // Not 'active' (nothing to render yet — participants/localStream aren't
+    // populated until enterActiveCall) and not 'idle' (would let a 1:1 or a
+    // second group call start concurrently via isActive()'s own idle check)
+    // — this transitional phase exists purely to close that gap.
+    state.phase = 'resuming';
+    const myGeneration = state.pollGeneration;
+
+    acquireLocalMedia()
+      .then(function (stream) {
+        if (state.pollGeneration !== myGeneration || state.phase !== 'resuming') {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return Promise.reject({ superseded: true });
+        }
+        state.localStream = stream;
+
+        // Our own screen-share claim from before the reload, if any — the
+        // actual getDisplayMedia() capture died with the page and must
+        // never be silently reacquired without a fresh user gesture (same
+        // "only ever from an explicit click" posture startScreenShare
+        // already documents). Release the slot; the sharing indicator
+        // clears for everyone and this side can click Share Screen again.
+        if (call.screen_share && call.screen_share.user.id === state.currentUser.id) {
+          Api.request({ url: '/calls/group/' + call.id + '/screen-share/stop', method: 'POST' });
+        }
+
+        return Api.request({ url: '/calls/group/' + call.id + '/join', method: 'POST' });
+      })
+      .then(function (response) {
+        if (state.pollGeneration !== myGeneration) return Promise.reject({ superseded: true });
+        enterActiveCall(response.call);
+      })
+      .catch(function (err) {
+        if (err && err.superseded) return;
+        // Fail soft — never POST .../leave here (the whole point of this
+        // feature is that failing to reconnect instantly isn't the same as
+        // leaving): just drop back to idle and let the next idle poll try
+        // again. If the underlying issue (mic now blocked, etc.) doesn't
+        // resolve, services/call_service.apply_group_call_abandonment
+        // eventually reaps the now-stale participant row server-side.
+        cleanupLocalMedia();
+        state.callId = null;
+        state.conversationId = null;
+        state.creatorId = null;
+        state.phase = 'idle';
+        render();
+        scheduleNextPoll();
+      });
   }
 
   // --- WebRTC mesh ------------------------------------------------------
@@ -1497,19 +1616,19 @@ const GroupCalls = (function ($) {
     if (message) Ping.showToast(message, 'error');
   }
 
-  // Best-effort cleanup if the tab/page is closed mid-call — fetch with
-  // keepalive survives the page unloading, unlike a normal $.ajax request,
-  // which the browser may abort before it's sent. Never blocks unload.
-  window.addEventListener('pagehide', function () {
-    if (state.phase === 'active' && state.callId) {
-      const token = Ping.getToken();
-      fetch(API_BASE_URL + '/calls/group/' + state.callId + '/leave', {
-        method: 'POST',
-        keepalive: true,
-        headers: token ? { Authorization: 'Bearer ' + token } : {}
-      }).catch(function () {});
-    }
-  });
+  // Deliberately NO pagehide/beforeunload/visibilitychange handler here —
+  // there used to be one that POSTed .../leave on pagehide, but a page
+  // refresh fires that exact same event, with no way to tell it apart from
+  // a real tab close at the browser-event level (see the module docstring).
+  // So unload is no longer treated as an intentional leave at all: a
+  // refreshed participant's row simply stays 'joined' server-side and this
+  // side reconnects automatically on reload (see resumeActiveCall). A
+  // genuinely abandoned tab (really closed, never reopened) is instead
+  // caught lazily by services/call_service.apply_group_call_abandonment
+  // once this participant's last_activity_at goes stale — see
+  // models.CallParticipant's docstring. Explicit Leave (leaveCall) and End
+  // Call (endCallForEveryone) remain the only ways to intentionally end
+  // this side's participation.
 
   function stopPolling() {
     clearTimeout(state.pollTimer);

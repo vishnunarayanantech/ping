@@ -381,6 +381,17 @@ def get_active_group_call(
     resume one already joined after a page reload — the group equivalent of
     GET /calls/active above."""
     call = call_service.get_active_group_call_for_user(db, current_user.id)
+    if call:
+        call = call_service.apply_group_call_abandonment(db, call)
+        # The sweep above may have just reaped a stale "joined" row —
+        # including, in principle, current_user's own (their last poll
+        # before this one went stale past the grace period) — so re-check
+        # they still have a live stake before returning this call at all,
+        # same "don't return a call this user can no longer see" posture
+        # apply_ring_timeout's caller already applies for direct calls.
+        participant = call_service.get_group_call_participant(db, call.id, current_user.id)
+        if not participant or participant.status not in ("invited", "joined"):
+            call = None
     return GroupCallActiveResponse(success=True, call=call_service.to_group_call_out(call) if call else None)
 
 
@@ -392,7 +403,13 @@ def get_group_call(
     db: Session = Depends(get_db),
 ):
     call = _get_group_call_or_404(db, call_id)
-    _require_group_access(db, call_id, current_user.id)
+    call = call_service.apply_group_call_abandonment(db, call)
+    participant = _require_group_access(db, call_id, current_user.id)
+    if participant.status == "joined":
+        # This poll itself IS the liveness signal — see
+        # models.CallParticipant.last_activity_at's docstring. Not touched
+        # for a merely-"invited" participant (see touch_group_call_participant).
+        call_service.touch_group_call_participant(db, participant)
 
     signals = call_service.get_new_group_signals(db, call_id, current_user.id, after_signal_id)
     return GroupCallStateResponse(

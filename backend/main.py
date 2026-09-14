@@ -139,6 +139,18 @@ def _add_missing_columns():
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE calls ADD COLUMN screen_sharing_user_id INTEGER REFERENCES users(id)"))
 
+    # group-call refresh survival: same trick for
+    # call_participants.last_activity_at. Every existing "joined" row
+    # predates this column; backfilling it to that row's own joined_at (never
+    # NULL for a "joined" row) means nobody currently mid-call gets treated
+    # as instantly stale by services/call_service.apply_group_call_abandonment
+    # the moment this migration runs — see models.CallParticipant's docstring.
+    call_participant_columns = {col["name"] for col in inspector.get_columns("call_participants")}
+    if "last_activity_at" not in call_participant_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE call_participants ADD COLUMN last_activity_at TIMESTAMP"))
+            conn.execute(text("UPDATE call_participants SET last_activity_at = joined_at WHERE status = 'joined'"))
+
 
 _add_missing_columns()
 
