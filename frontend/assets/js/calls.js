@@ -52,6 +52,54 @@
  * track.muted, unreliable for the same reason camera-state already isn't —
  * see schemas.CALL_SIGNAL_TYPES) tells the other side sharing started/
  * stopped without needing another renegotiation for every toggle.
+ *
+ * Surviving a page refresh: a reload destroys every WebRTC object below
+ * (RTCPeerConnection, MediaStream, MediaStreamTrack) — that part is
+ * unavoidable. What's NOT unavoidable is treating that reload as a hangup:
+ * there is deliberately no beforeunload/unload/pagehide/visibilitychange
+ * handler here that ends the call, mirroring groupcalls.js's own "no
+ * pagehide handler" precedent (see that module's docstring) for the exact
+ * same reason — that event fires identically on a real tab close and on a
+ * plain refresh, so it can never be trusted to mean "the user is leaving
+ * for good." Instead:
+ *   - The refreshed side discovers it was already on this call the same way
+ *     an incoming call is discovered — GET /calls/active, which already
+ *     doubles as this per its own backend docstring — and reconnects via
+ *     resumeActiveCall(): reacquire media, then sendReconnectOffer() a
+ *     BRAND NEW RTCPeerConnection (the old one is gone with the rest of the
+ *     page's JS state; there's nothing left to reuse).
+ *   - The OTHER side, still fully loaded, notices via
+ *     oniceconnectionstatechange (the refreshed browser's old connection
+ *     just died) but does NOT immediately hang up —
+ *     beginReconnectGracePeriod() shows "Reconnecting…" and waits up to
+ *     CALL_RECONNECT_GRACE_MS for either ICE to self-heal or an incoming
+ *     reconnect offer, only hanging up if neither happens in time. On
+ *     receiving that reconnect offer (handleReconnectOffer), THIS side ALSO
+ *     rebuilds a brand new RTCPeerConnection rather than trying to
+ *     renegotiate the old one — the resuming side's fresh connection has no
+ *     memory of any screen-share m-line that may have been negotiated
+ *     before, and WebRTC forbids a later offer from silently dropping an
+ *     m-section an existing connection already has, so reusing the old
+ *     connection risks an invalid renegotiation. Screen sharing is
+ *     therefore always dropped by ANY reconnect (not just the sharer's own
+ *     reload) and must be manually restarted — never silently reacquired
+ *     without a fresh user gesture, same posture startScreenShare already
+ *     requires.
+ *   - Both directions reuse the SAME pendingRenegotiationResolve/Reject/
+ *     negotiating primitives (and the same polite-receiver-yields collision
+ *     rule) the screen-share renegotiation above already established —
+ *     "who's allowed to have an outstanding local offer right now" is the
+ *     same question whether the SDP change is a screen-share toggle or a
+ *     reconnect, so a reconnect racing a screen-share renegotiation (or two
+ *     near-simultaneous reconnects, e.g. both sides reload at once)
+ *     resolves the same way that machinery already does, with no new state
+ *     machine.
+ *   - A small non-sensitive recovery hint (callId/callType/conversationId/
+ *     muted/cameraOn) is mirrored to localStorage (saveCallRecoveryHint)
+ *     purely so a fresh page load can restore local mute/camera-off state
+ *     before the first render — it is NEVER treated as proof the call still
+ *     exists; GET /calls/active is the only source of truth
+ *     resumeActiveCall acts on.
  */
 const Calls = (function ($) {
   'use strict';
@@ -149,7 +197,17 @@ const Calls = (function ($) {
     durationTimer: null,
     callStartedAt: null,
     connectTimeoutTimer: null,
-    endedDisplayTimer: null
+    endedDisplayTimer: null,
+    // Page-refresh recovery (see the module docstring's "Surviving a page
+    // refresh" section). True while either (a) this side just resumed after
+    // its own reload and is renegotiating a fresh RTCPeerConnection, or (b)
+    // THIS side's ICE connection just failed/disconnected and is waiting
+    // out reconnectGraceTimer for either self-recovery or an incoming
+    // reconnect offer — see beginReconnectGracePeriod/handleReconnectOffer.
+    // Purely a UI/guard flag ("Reconnecting…" vs "Connecting…"/"Connected"
+    // — see renderActiveBar); never sent to the backend.
+    reconnecting: false,
+    reconnectGraceTimer: null
   };
 
   // #callOverlay: the full-screen blocking panel — calling/incoming/ended only.
@@ -229,7 +287,12 @@ const Calls = (function ($) {
         state.iceServers = DEFAULT_ICE_SERVERS;
       });
 
-    scheduleNextPoll();
+    // Polled immediately rather than merely scheduled — this doubles as the
+    // "was I already on an active call before this reload?" resume check
+    // (see pollForIncoming/resumeActiveCall), so a refreshed participant
+    // doesn't have to wait out one full CALL_POLL_INTERVAL_IDLE_MS tick
+    // before reconnecting. Mirrors groupcalls.js's own init()/pollForIncoming.
+    pollForIncoming();
   }
 
   function rtcSupported() {
@@ -264,6 +327,15 @@ const Calls = (function ($) {
     Api.request({ url: '/calls/active' })
       .done(function (response) {
         if (state.phase !== 'idle') return; // an outgoing call started locally in the meantime
+        if (response.call && response.call.status === 'accepted') {
+          // Not a fresh incoming call — this side (caller or receiver) was
+          // already connected to it before the page reloaded (a refresh
+          // destroys the RTCPeerConnection/MediaStream but must never be
+          // treated as a hangup — see the module docstring's "Surviving a
+          // page refresh" section). Reconnect instead of showing anything.
+          resumeActiveCall(response.call);
+          return; // resumeActiveCall's own poll takes over from here
+        }
         if (response.call && response.call.status === 'ringing' && response.call.receiver.id === state.currentUser.id) {
           showIncoming(response.call);
           return; // pollCallState takes over at active speed from here
@@ -319,6 +391,7 @@ const Calls = (function ($) {
       case 'accepted':
         if (state.phase === 'calling') {
           state.phase = 'connecting';
+          saveCallRecoveryHint();
           startConnectTimeout();
           render();
           checkIceConnected(); // ICE may have already connected before this transition ran — see its docstring
@@ -593,6 +666,7 @@ const Calls = (function ($) {
         if (!stillMine()) return Promise.reject({ superseded: true });
         sendSignal('answer', { sdp: state.pc.localDescription });
         state.phase = 'connecting';
+        saveCallRecoveryHint();
         startConnectTimeout();
         render();
         checkIceConnected(); // ICE may have already connected before this transition ran — see its docstring
@@ -642,6 +716,163 @@ const Calls = (function ($) {
     endWithReason('ended', true); // silent for whoever clicked it; the other side sees "Call ended" via poll
   }
 
+  // --- Call recovery (page refresh) ---------------------------------------
+  // See the module docstring's "Surviving a page refresh" section for the
+  // full design. localStorage helpers first (write-only bookkeeping — never
+  // trusted as proof a call still exists), then resumeActiveCall itself.
+
+  const CALL_RECOVERY_STORAGE_KEY = 'ping_active_direct_call';
+
+  function saveCallRecoveryHint() {
+    if (!state.callId) return;
+    try {
+      localStorage.setItem(CALL_RECOVERY_STORAGE_KEY, JSON.stringify({
+        callId: state.callId,
+        callType: state.callType,
+        conversationId: state.conversationId,
+        muted: state.muted,
+        cameraOn: state.cameraOn
+      }));
+    } catch (e) {
+      // Storage unavailable (private browsing, quota, disabled) — GET
+      // /calls/active is the actual source of truth for recovery; losing
+      // this hint just means a refresh falls back to the default (unmuted,
+      // camera-on) local toggle state instead of restoring the exact one.
+    }
+  }
+
+  function clearCallRecoveryHint() {
+    try { localStorage.removeItem(CALL_RECOVERY_STORAGE_KEY); } catch (e) { /* see saveCallRecoveryHint */ }
+  }
+
+  function readCallRecoveryHint() {
+    try {
+      const raw = localStorage.getItem(CALL_RECOVERY_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Restores locally-remembered mute/camera-off state right after
+   * reacquiring media in resumeActiveCall — the hint is only ever applied
+   * to toggle tracks that already exist (never used to decide WHETHER to
+   * request video; call.call_type/acquireLocalMedia already own that), and
+   * only if it actually matches the call being resumed (a stale hint from a
+   * different, already-ended call is simply ignored). */
+  function applyStoredLocalToggles() {
+    const hint = readCallRecoveryHint();
+    if (!hint || hint.callId !== state.callId) return;
+    if (hint.muted && state.localStream) {
+      state.muted = true;
+      state.localStream.getAudioTracks().forEach(function (t) { t.enabled = false; });
+    }
+    if (hint.cameraOn === false && hasVideoTrack()) {
+      state.cameraOn = false;
+      state.localStream.getVideoTracks().forEach(function (t) { t.enabled = false; });
+    }
+  }
+
+  /**
+   * Reconnects to a direct call this side was already 'accepted'/active on
+   * before the page reloaded — found by pollForIncoming's own resume check
+   * (GET /calls/active already doubles as this per its own backend
+   * docstring). Mirrors groupcalls.js's own resumeActiveCall (acquire media
+   * -> fetch a fresh signal cursor -> negotiate), generalized to calls.js's
+   * single-peer shape; there's no 1:1 equivalent of re-POSTing "join" (this
+   * side already accepted/was accepted before the reload), so this goes
+   * straight to rebuilding the WebRTC connection instead.
+   */
+  function resumeActiveCall(call) {
+    if (state.phase !== 'idle') return; // something else already claimed the phase — next idle tick retries
+    if (window.GroupCalls && GroupCalls.isActive()) return; // mutually exclusive with a group call — next idle tick retries once it ends
+    if (!rtcSupported()) { clearCallRecoveryHint(); return; } // silent — this is a background resume, not a user action; nothing has been shown yet this page load
+
+    state.role = call.caller.id === state.currentUser.id ? 'caller' : 'receiver';
+    state.callId = call.id;
+    state.callType = call.call_type;
+    state.conversationId = call.conversation_id;
+    state.otherUser = state.role === 'caller' ? call.receiver : call.caller;
+    state.lastSignalId = 0;
+    state.phase = 'connecting';
+    state.reconnecting = true;
+    // Pre-seeded from the server's answered_at (this call was already
+    // accepted before the reload) so checkIceConnected's own
+    // "only if unset" guard leaves it alone once ICE reconnects — the
+    // visible call-duration timer resumes counting from the TRUE elapsed
+    // time instead of jumping back to 00:00.
+    state.callStartedAt = call.answered_at ? new Date(call.answered_at).getTime() : null;
+    render(); // immediate "Reconnecting…" bar feedback, before the media prompt / network round trips below
+
+    const myGeneration = state.pollGeneration;
+    const stillMine = function () { return state.pollGeneration === myGeneration; };
+
+    acquireLocalMedia(state.callType === 'video')
+      .then(function (result) {
+        if (!stillMine()) {
+          result.stream.getTracks().forEach(function (t) { t.stop(); });
+          return Promise.reject({ superseded: true });
+        }
+        state.localStream = result.stream;
+        state.cameraOn = result.videoEnabled;
+        applyStoredLocalToggles();
+        if (result.downgraded) {
+          Ping.showToast('Camera unavailable — reconnecting with audio only.', 'error');
+        }
+        render(); // reflect the reacquired local stream (camera preview, mute/camera buttons) as soon as it's ready
+        // Fetch (without applying) everything already on this call so
+        // lastSignalId can be fast-forwarded past the ORIGINAL handshake's
+        // offer/answer/ICE history — replaying that into a brand new
+        // RTCPeerConnection below would be at best redundant, at worst
+        // confusing (see the task's "old signal cursors consuming fresh
+        // SDP" race). Only the call's CURRENT status is acted on here.
+        return Api.request({ url: '/calls/' + call.id + '?after_signal_id=0' });
+      })
+      .then(function (response) {
+        if (!stillMine()) return Promise.reject({ superseded: true });
+        if (response.call.status !== 'accepted') return Promise.reject({ alreadyEnded: true });
+        state.lastSignalId = response.signals.reduce(function (m, s) { return Math.max(m, s.id); }, 0);
+        // Start the poll loop NOW, before awaiting the offer below — not
+        // after. sendReconnectOffer()'s returned promise can only resolve
+        // once a poll picks up the peer's 'answer' signal (see handleSignal's
+        // 'answer' branch), so starting polling AFTER awaiting it would be a
+        // deadlock (nothing would ever fetch the answer that unblocks it).
+        // pollCallState() is self-sustaining from here via its own
+        // .always()'s scheduleNextPoll(), so this one call is enough.
+        pollCallState();
+        return sendReconnectOffer();
+      })
+      .then(function () {
+        if (!stillMine()) return;
+        // state.reconnecting stays true (still showing "Reconnecting…")
+        // until checkIceConnected() below confirms ICE is actually back up
+        // — not merely that the answer was sent — see that function's own
+        // comment on where this gets cleared.
+        if (state.callType === 'video') sendSignal('camera-state', { enabled: state.cameraOn });
+        saveCallRecoveryHint();
+        startConnectTimeout();
+        render();
+        checkIceConnected(); // ICE may already be connected by the time this runs — see its own docstring
+      })
+      .catch(function (err) {
+        if (err && err.superseded) return; // already cleaned up / replaced elsewhere — don't touch shared state
+        if (err && err.alreadyEnded) {
+          // The backend is authoritative — this call was rejected/cancelled/
+          // hung up/missed while this side was reloading. Nothing to notify
+          // (this side never saw it active this page load), just go idle.
+          resetToIdle();
+          return;
+        }
+        // The reconnect attempt itself failed (media denied outright,
+        // offer/answer/ICE setup errored, or timed out) — tell the backend
+        // so the other side isn't left waiting out its own grace period for
+        // nothing, same as the original handshake's own connect-timeout
+        // already does for an equivalent failure.
+        if (state.callId) Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
+        endWithReason('failed');
+      });
+  }
+
   // --- WebRTC ---------------------------------------------------------
 
   function createPeerConnection() {
@@ -685,10 +916,17 @@ const Calls = (function ($) {
     pc.oniceconnectionstatechange = function () {
       const cs = pc.iceConnectionState;
       if (cs === 'connected' || cs === 'completed') {
+        clearReconnectGraceTimer();
+        if (state.reconnecting) { state.reconnecting = false; render(); }
         checkIceConnected();
-      } else if (cs === 'failed') {
-        if (state.callId) Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
-        endWithReason('failed');
+      } else if (cs === 'failed' || cs === 'disconnected') {
+        // NOT necessarily a real failure — the other side's browser may
+        // simply be mid-reload (its old connection just died with the rest
+        // of its JS state). See beginReconnectGracePeriod/the module
+        // docstring's "Surviving a page refresh" section: this waits for
+        // either self-recovery or an incoming reconnect offer before ever
+        // treating this as a hangup-worthy failure.
+        beginReconnectGracePeriod();
       }
     };
 
@@ -712,7 +950,18 @@ const Calls = (function ($) {
     if (cs !== 'connected' && cs !== 'completed') return;
     clearTimeout(state.connectTimeoutTimer);
     state.phase = 'connected';
-    state.callStartedAt = Date.now();
+    // Only set on a genuinely first connect — resumeActiveCall pre-seeds
+    // this from the call's server-side answered_at before this ever runs,
+    // so a reconnect (page refresh, or a brief ICE blip while already
+    // 'connected' — see oniceconnectionstatechange's early-return above for
+    // why THIS function never even re-runs in that second case) doesn't
+    // reset the visible call duration back to 00:00.
+    if (!state.callStartedAt) state.callStartedAt = Date.now();
+    // Cleared HERE rather than the moment an answer is merely sent
+    // (resumeActiveCall/handleReconnectOffer) — this is the point ICE
+    // itself confirms the connection is actually back up, so "Reconnecting…"
+    // never flips to "Connected" a beat before media is really flowing.
+    state.reconnecting = false;
     startDurationTimer();
     render();
   }
@@ -725,6 +974,15 @@ const Calls = (function ($) {
 
   function handleSignal(signal) {
     if (signal.message_type === 'offer') {
+      // A reconnect offer (see sendReconnectOffer/the module docstring's
+      // "Surviving a page refresh" section) is explicitly tagged, rather
+      // than told apart by connection state like the two cases below — the
+      // whole point is it can arrive whether or not THIS side's own pc/
+      // remote description still looks intact.
+      if (signal.payload.reconnect) {
+        handleReconnectOffer(signal.payload.sdp);
+        return;
+      }
       // The initial handshake's offer (caller -> receiver, before the call
       // is even accepted) vs. a screen-share renegotiation offer (either
       // side, only once the connection already has a remote description
@@ -920,6 +1178,219 @@ const Calls = (function ($) {
       });
   }
 
+  // --- Reconnect (page refresh recovery) -----------------------------------
+  // See the module docstring's "Surviving a page refresh" section. Reuses
+  // the SAME pendingRenegotiationResolve/Reject/negotiating/polite-receiver-
+  // yields machinery the screen-share renegotiation above already
+  // established — "who's allowed to have an outstanding local offer right
+  // now" is the same question for a reconnect as it is for a screen-share
+  // toggle, so a reconnect racing either a screen-share renegotiation or
+  // another reconnect (both sides reload at once) resolves the same way
+  // that machinery already does, with no new state machine.
+
+  /** Closes/replaces only the RTCPeerConnection and its remote-track
+   * bookkeeping — a narrower cleanupRtc(), used when RECOVERING a
+   * connection (sendReconnectOffer/handleReconnectOffer) rather than ending
+   * the call. Unlike cleanupRtc(), this never touches state.localStream
+   * (the mic/camera keep running on whichever side didn't just reload) and
+   * never touches phase/pollGeneration/call-level timers — only state that
+   * belongs to the OLD, now-discarded peer connection. Idempotent, like
+   * every other teardown path in this module. */
+  function teardownPeerConnectionOnly() {
+    if (state.pc) {
+      state.pc.onicecandidate = null;
+      state.pc.ontrack = null;
+      state.pc.oniceconnectionstatechange = null;
+      state.pc.close();
+      state.pc = null;
+    }
+    if (state.remoteVideoTrack) {
+      state.remoteVideoTrack.onmute = null;
+      state.remoteVideoTrack.onunmute = null;
+      state.remoteVideoTrack.onended = null;
+      state.remoteVideoTrack = null;
+    }
+    if (state.remoteScreenTrack) {
+      state.remoteScreenTrack.onmute = null;
+      state.remoteScreenTrack.onunmute = null;
+      state.remoteScreenTrack.onended = null;
+      state.remoteScreenTrack = null;
+    }
+    state.pendingCandidates = [];
+    state.pendingOffer = null;
+    $remoteAudio[0].srcObject = null;
+    $remoteVideo[0].srcObject = null;
+  }
+
+  /** Clears this side's screen-share state as part of rebuilding a peer
+   * connection from scratch (handleReconnectOffer) — a share can never be
+   * carried over to a brand new RTCPeerConnection (see that function's
+   * docstring for the WebRTC m-line constraint this sidesteps), so whoever
+   * was sharing simply presses Share Screen again once reconnected, same as
+   * the module docstring already requires of the sharer's OWN reload. */
+  function resetScreenShareStateForReconnect() {
+    if (state.screenTrack) {
+      state.screenTrack.onended = null;
+      state.screenTrack.stop();
+      state.screenTrack = null;
+    }
+    if (state.screenStream) {
+      state.screenStream.getTracks().forEach(function (t) { t.stop(); });
+      state.screenStream = null;
+    }
+    state.screenSender = null;
+    const wasSharing = state.screenShareActive || state.remoteScreenSharing;
+    state.screenShareActive = false;
+    state.remoteScreenSharing = false;
+    if (wasSharing) {
+      Ping.showToast('Screen sharing stopped — reconnecting the call.', 'error');
+    }
+  }
+
+  /** Sends a fresh offer over a BRAND NEW RTCPeerConnection — called both
+   * by the side resuming after its own reload (resumeActiveCall) and, via
+   * the collision path below, by a side that loses a simultaneous-reconnect
+   * glare. Resolved by whatever 'answer' next arrives, via the exact same
+   * pendingRenegotiationResolve/Reject plumbing renegotiate() already uses
+   * for screen-share renegotiation — handleSignal's 'answer' branch doesn't
+   * need to know or care which kind of renegotiation it's completing.
+   * Tagged payload.reconnect=true so the other side's handleSignal tells
+   * this apart from the very first offer of a brand new call. */
+  function sendReconnectOffer() {
+    state.negotiating = true;
+    teardownPeerConnectionOnly();
+    createPeerConnection();
+    addLocalTracks();
+
+    return state.pc.createOffer()
+      .then(function (offer) { return state.pc.setLocalDescription(offer); })
+      .then(function () {
+        sendSignal('offer', { sdp: state.pc.localDescription, reconnect: true });
+        return new Promise(function (resolve, reject) {
+          state.pendingRenegotiationResolve = resolve;
+          state.pendingRenegotiationReject = reject;
+          state.renegotiationTimeout = setTimeout(function () {
+            clearPendingRenegotiation();
+            reject(new Error('Reconnect timed out'));
+          }, CALL_CONNECT_TIMEOUT_MS);
+        });
+      })
+      .catch(function (err) {
+        // A collision loss (see handleReconnectOffer) tags its rejection
+        // with .superseded — same "leave `negotiating` alone, the winner
+        // already owns it" reasoning renegotiate()'s own catch documents.
+        if (!(err && err.superseded)) state.negotiating = false;
+        clearPendingRenegotiation();
+        throw err;
+      });
+  }
+
+  /** Handles an incoming reconnect offer — the other side just resumed a
+   * call after its own page reload (or is retrying after its own ICE
+   * failure). Always rebuilds THIS side's peer connection from scratch too
+   * rather than reusing/renegotiating the old one: the resuming side's
+   * fresh RTCPeerConnection has no memory of any screen-share m-line that
+   * may have been negotiated before, and WebRTC forbids a later offer from
+   * silently dropping an m-section a connection already has — reusing the
+   * old connection would risk an invalid renegotiation. Any in-progress
+   * screen share is deliberately cleared here instead (see
+   * resetScreenShareStateForReconnect).
+   *
+   * Glare-guarded exactly like handleRenegotiationOffer above (same
+   * polite-receiver-yields convention) for the rare case THIS side ALSO has
+   * an outstanding local offer right now — either its own reconnect (both
+   * participants reloaded near-simultaneously) or an unrelated screen-share
+   * renegotiation a reconnect should always take priority over. */
+  function handleReconnectOffer(sdp) {
+    if (state.phase !== 'connecting' && state.phase !== 'connected') return; // not a call this side currently recognizes as live
+    if (!state.localStream) return; // our own media is gone too — our OWN resumeActiveCall (if any) drives this side instead of this inbound offer
+
+    const polite = state.role === 'receiver';
+    if (state.negotiating && !state.pendingRenegotiationReject) return; // already mid-answering a previous reconnect (or some other non-offering negotiation) — drop this duplicate/overlapping offer, the sender's own timeout will retry
+    if (state.negotiating && !polite) return; // impolite side with its own outstanding offer — drop, keep waiting on it
+
+    clearReconnectGraceTimer();
+    if (state.pendingRenegotiationReject) {
+      // Our own outstanding renegotiate()/sendReconnectOffer() attempt lost
+      // the race — reject it (tagged .superseded) without touching
+      // `negotiating`, which this answering flow is about to keep using.
+      const reject = state.pendingRenegotiationReject;
+      clearPendingRenegotiation();
+      const err = new Error('Reconnect superseded by remote offer');
+      err.superseded = true;
+      reject(err);
+    }
+
+    state.negotiating = true;
+    state.reconnecting = true;
+    resetScreenShareStateForReconnect();
+    render();
+
+    teardownPeerConnectionOnly();
+    createPeerConnection();
+    addLocalTracks();
+
+    state.pc.setRemoteDescription(new RTCSessionDescription(sdp))
+      .then(flushPendingCandidates)
+      .then(function () { return state.pc.createAnswer(); })
+      .then(function (answer) { return state.pc.setLocalDescription(answer); })
+      .then(function () {
+        sendSignal('answer', { sdp: state.pc.localDescription });
+        if (state.callType === 'video') sendSignal('camera-state', { enabled: state.cameraOn });
+        // state.reconnecting stays true (still showing "Reconnecting…")
+        // until the new pc's OWN oniceconnectionstatechange confirms ICE is
+        // actually back up — not merely that an answer was sent.
+        if (state.phase !== 'connected') startConnectTimeout();
+        saveCallRecoveryHint();
+        render();
+        checkIceConnected();
+      })
+      .catch(function () {
+        // A failed reconnect-answer just means THIS attempt didn't take —
+        // restart the grace-period wait (cleared above, at the top of this
+        // function) rather than declaring failure immediately; a fresh
+        // reconnect offer or ICE self-recovery can still land before the
+        // new deadline. Worst case, the OTHER side's own sendReconnectOffer
+        // await (CALL_CONNECT_TIMEOUT_MS) times out first and hangs up
+        // cleanly, which this side's next poll then picks up regardless of
+        // where this grace period is at — only an exhausted grace period
+        // with no such hangup ever ends the call from THIS side's own
+        // initiative.
+        beginReconnectGracePeriod();
+      })
+      .finally(function () {
+        state.negotiating = false;
+        render();
+      });
+  }
+
+  /** A page refresh (or a genuine transient network drop) makes THIS side's
+   * ICE connection fail without ever being an explicit hangup/cancel/
+   * reject/leave/end — see the module docstring's "Surviving a page
+   * refresh" section. Rather than hanging up the instant ICE reports
+   * 'failed'/'disconnected', this waits up to CALL_RECONNECT_GRACE_MS for
+   * either ICE to self-recover on its own or an incoming reconnect offer
+   * from a peer that just resumed after its own reload (see
+   * handleReconnectOffer) — only once NEITHER has happened by the deadline
+   * is this treated as a genuine failure. */
+  function beginReconnectGracePeriod() {
+    if (state.reconnectGraceTimer) return; // already counting down
+    state.reconnecting = true;
+    render();
+    state.reconnectGraceTimer = setTimeout(function () {
+      state.reconnectGraceTimer = null;
+      if (state.callId) Api.request({ url: '/calls/' + state.callId + '/hangup', method: 'POST' });
+      endWithReason('failed');
+    }, CALL_RECONNECT_GRACE_MS);
+  }
+
+  function clearReconnectGraceTimer() {
+    if (state.reconnectGraceTimer) {
+      clearTimeout(state.reconnectGraceTimer);
+      state.reconnectGraceTimer = null;
+    }
+  }
+
   function startConnectTimeout() {
     clearTimeout(state.connectTimeoutTimer);
     state.connectTimeoutTimer = setTimeout(function () {
@@ -938,6 +1409,7 @@ const Calls = (function ($) {
     state.localStream.getAudioTracks().forEach(function (track) {
       track.enabled = !state.muted; // stops sending audio without touching the call itself — see task's mute contract
     });
+    saveCallRecoveryHint(); // keeps the recovery hint's `muted` current so a LATER refresh restores this, not the default
     renderMuteButton();
   }
 
@@ -972,6 +1444,7 @@ const Calls = (function ($) {
     // frame — see schemas.CALL_SIGNAL_TYPES's docstring for why this can't
     // just rely on the video track's native muted state.
     sendSignal('camera-state', { enabled: state.cameraOn });
+    saveCallRecoveryHint(); // keeps the recovery hint's `cameraOn` current so a LATER refresh restores this, not the default
     render();
   }
 
@@ -1045,6 +1518,7 @@ const Calls = (function ($) {
   function startScreenShare() {
     if (state.phase !== 'connected' || state.callType !== 'audio') return;
     if (state.screenShareActive || state.negotiating) return; // already sharing, or a renegotiation is already in flight — never a second concurrent attempt
+    if (state.reconnecting) return; // the peer connection this would attach a track to is mid-rebuild (see handleReconnectOffer) — wait for it to settle first
     if (!screenShareSupported()) {
       Ping.showToast('Screen sharing is not supported in this browser.', 'error');
       return;
@@ -1183,7 +1657,7 @@ const Calls = (function ($) {
   function renderScreenShareButton() {
     $screenShareBtn
       .prop('hidden', state.callType !== 'audio')
-      .prop('disabled', state.negotiating)
+      .prop('disabled', state.negotiating || state.reconnecting)
       .toggleClass('is-active', state.screenShareActive)
       .attr('aria-label', state.screenShareActive ? 'Stop sharing your screen' : 'Share your screen')
       .attr('title', state.screenShareActive ? 'Stop Sharing' : 'Share Screen')
@@ -1320,6 +1794,8 @@ const Calls = (function ($) {
     state.durationTimer = null;
     clearTimeout(state.connectTimeoutTimer);
     state.connectTimeoutTimer = null;
+    clearReconnectGraceTimer();
+    state.reconnecting = false;
   }
 
   /**
@@ -1359,6 +1835,7 @@ const Calls = (function ($) {
     clearTimeout(state.endedDisplayTimer);
     state.endedDisplayTimer = null;
 
+    clearCallRecoveryHint(); // this call is genuinely over (or never resumed) — nothing left to recover on a future reload
     cleanupRtc();
     state.pollGeneration++; // invalidate any in-flight poll tied to the old call
     state.phase = 'idle';
@@ -1390,7 +1867,11 @@ const Calls = (function ($) {
   }
 
   function updateTimerText() {
-    if (state.phase !== 'connected') return;
+    // The `reconnecting` guard matters here specifically: durationTimer's
+    // own setInterval calls this every second independent of render(), and
+    // would otherwise stomp the "Reconnecting…" text renderActiveBar just
+    // set right back to the mm:ss counter on the very next tick.
+    if (state.phase !== 'connected' || state.reconnecting) return;
     const seconds = Math.max(0, Math.floor((Date.now() - state.callStartedAt) / 1000));
     const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
     const ss = String(seconds % 60).padStart(2, '0');
@@ -1474,7 +1955,13 @@ const Calls = (function ($) {
       $activeBarName.text(state.otherUser.name);
     }
     if (state.phase === 'connecting') {
-      $activeBarStatus.text('Connecting…');
+      $activeBarStatus.text(state.reconnecting ? 'Reconnecting…' : 'Connecting…');
+    } else if (state.reconnecting) {
+      // Connected before, but this side's (or the peer's) connection just
+      // dropped and a reconnect is in flight — see beginReconnectGracePeriod/
+      // handleReconnectOffer. Deliberately NOT "Call ended" (task
+      // requirement) — the call itself is still very much alive.
+      $activeBarStatus.text('Reconnecting…');
     } else {
       updateTimerText(); // "Connected" itself is implied by the running timer
     }

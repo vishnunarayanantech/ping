@@ -53,6 +53,16 @@ const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 // button stuck disabled forever.
 const CALL_RENEGOTIATION_TIMEOUT_MS = 15000;
 
+// A page refresh (or a genuine transient network drop) makes the OTHER
+// participant's ICE connection report 'disconnected'/'failed' with no
+// explicit hangup ever sent — see calls.js's "Surviving a page refresh"
+// docstring. This bounds how long that side waits (showing "Reconnecting…")
+// for either ICE to self-recover or a fresh offer from a peer who just
+// resumed after their own reload, before giving up and treating it as a
+// genuine failure — independent of CALL_CONNECT_TIMEOUT_MS, which only
+// covers the very first handshake before a call ever connects.
+const CALL_RECONNECT_GRACE_MS = 20000;
+
 // Group audio calling (see groupcalls.js) — a SEPARATE poll loop from
 // calls.js's (one-to-one calling and group calling are independent
 // features that can't overlap for one user — see groupcalls.js's module
