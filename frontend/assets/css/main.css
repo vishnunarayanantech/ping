@@ -742,6 +742,16 @@ p {
   box-shadow: var(--shadow-md);
 }
 
+/* Sized for a camera-tile placeholder (.group-call-video-tile__placeholder)
+   — bigger than the panel-row --sm avatar so it reads at a glance inside a
+   ~160-200px tile, but without --lg's border/shadow (which look wrong
+   floating over a plain dark background rather than a page). */
+.avatar--md {
+  width: 56px;
+  height: 56px;
+  font-size: 1.125rem;
+}
+
 .avatar img {
   width: 100%;
   height: 100%;
@@ -2697,6 +2707,14 @@ p {
   color: var(--color-error);
 }
 
+/* is-active marks camera OFF, same inverted convention as the mute button
+   above (renderCameraButton) — a highlighted "off" indicator, not an
+   "on-air" one. */
+.group-call-bar__camera.is-active {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
 .group-call-bar__end {
   height: 36px;
   padding: 0 var(--space-md);
@@ -2839,6 +2857,109 @@ p {
    change anything). */
 .group-call-screen-panel {
   top: 64px;
+}
+
+/* Camera video grid (see groupcalls.js's renderCameraGrid) — a SEPARATE
+   floating panel from .group-call-screen-panel above, positioned on the
+   OPPOSITE side (left vs. right) so both can be visible at once without
+   overlapping at typical desktop widths, same "independent floating
+   elements" approach as the screen viewer + participant panel already use.
+   auto-fill/minmax handles "one, two, three, and many active feeds"
+   without any JS-computed column count: it wraps to as many ~180px columns
+   as fit, then wraps rows as more tiles appear. */
+.group-call-video-grid {
+  position: fixed;
+  top: 64px;
+  left: var(--space-lg);
+  z-index: 480;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-sm);
+  width: min(620px, calc(100vw - 2 * var(--space-lg)));
+  max-height: calc(100vh - 64px - var(--space-lg));
+  overflow-y: auto;
+  animation: fadeSlideIn var(--transition-fast);
+}
+
+.group-call-video-tile {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #111;
+  box-shadow: var(--shadow-sm);
+}
+
+.group-call-video-tile__video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Mirrors THIS side's own camera only (a natural "looking in a mirror"
+   feel, same convention .call-video-panel__local already uses for the 1:1
+   local PIP) — never applied to a remote participant's tile. */
+.group-call-video-tile--self .group-call-video-tile__video {
+  transform: scaleX(-1);
+}
+
+/* Shown instead of the <video> above it whenever this tile's camera is
+   marked on (see cameraGridEntries — that's the only reason a tile exists
+   at all) but the actual WebRTC track hasn't arrived/settled yet — a
+   "reasonable placeholder" (task requirement), not an empty box. */
+.group-call-video-tile__placeholder {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: #1b1c22;
+}
+
+.group-call-video-tile--connecting .group-call-video-tile__video {
+  display: none;
+}
+
+.group-call-video-tile--connecting .group-call-video-tile__placeholder {
+  display: flex;
+}
+
+.group-call-video-tile__name {
+  position: absolute;
+  left: var(--space-xs);
+  bottom: var(--space-xs);
+  max-width: calc(100% - 2 * var(--space-xs));
+  padding: 0.15em 0.55em;
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .group-call-video-grid {
+    left: var(--space-sm);
+    width: calc(100vw - 2 * var(--space-sm));
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  }
+
+  /* At this width .group-call-screen-panel is ALSO close to full-width (see
+     its own @media rule), so the two floating panels no longer fit
+     side-by-side the way they do on desktop — shift the grid down to clear
+     it instead of overlapping. Only applied while a screen share is
+     actually active (see groupcalls.js's renderScreenPanel, which toggles
+     this body class) so an audio-plus-camera-only call on a narrow screen
+     still gets the grid right under the bar with no wasted gap. The offset
+     mirrors .call-video-panel--screen-share's own mobile width/aspect-ratio
+     formula so it clears the panel exactly, however wide the viewport is. */
+  body.group-call-screen-sharing .group-call-video-grid {
+    top: calc(64px + min(320px, 100vw - 4 * var(--space-sm)) * 9 / 16 + var(--space-sm));
+  }
 }
 
 /* Start-group-call modal's contact picker — same list/row shape as

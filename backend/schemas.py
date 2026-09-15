@@ -501,6 +501,21 @@ class CallActiveResponse(BaseModel):
 # participants' viewers update the instant the sharer toggles, without
 # waiting out a poll tick, same as it already does for a 1:1 call's single
 # other party.
+#
+# "camera-state" is used TWO different ways depending on scope: for a
+# DIRECT call it's still point-to-point (peer_user_id implied — there's only
+# one other party). For a GROUP call it's ALSO allowed broadcast
+# (peer_user_id=None), joining mute-state/screen-share-state above — unlike
+# screen sharing, camera has no server-side exclusivity to be authoritative
+# about (any number of participants may have a camera on at once, so there's
+# no models.Call column for it), so the broadcast signal (reconciled by every
+# participant's groupcalls.js into that peer's own participant-map entry) is
+# the ONLY "is this participant's camera currently on" fact a group call
+# has — the underlying WebRTC video track's own liveness can't serve that
+# role, since replaceTrack(null) (how a group participant turns their camera
+# back off — see groupcalls.js's stopLocalCameraTracks) leaves the remote
+# side's already-negotiated track object sitting at readyState "live"
+# indefinitely rather than ending it.
 CALL_SIGNAL_TYPES = {"offer", "answer", "ice-candidate", "camera-state", "screen-share-state", "mute-state"}
 
 

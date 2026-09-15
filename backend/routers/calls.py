@@ -556,11 +556,12 @@ def post_group_signal(
         target = call_service.get_group_call_participant(db, call_id, payload.peer_user_id)
         if not target or target.status != "joined":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That participant isn't in this call")
-    elif payload.message_type not in ("mute-state", "screen-share-state"):
-        # Both are broadcasts (peer_user_id=None) — see schemas.CALL_SIGNAL_TYPES's
-        # docstring for why screen-share-state joins mute-state here: one
-        # participant's share starting/stopping is the same fact for
-        # everybody in the call, not a pairwise negotiation.
+    elif payload.message_type not in ("mute-state", "screen-share-state", "camera-state"):
+        # All three are broadcasts (peer_user_id=None) — see
+        # schemas.CALL_SIGNAL_TYPES's docstring for why screen-share-state and
+        # camera-state join mute-state here: one participant's mic/camera/
+        # share toggling is the same fact for everybody in the call, not a
+        # pairwise negotiation.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="peer_user_id is required for this signal type")
 
     call_service.add_signal(db, call_id, current_user.id, payload.message_type, payload.payload, payload.peer_user_id)

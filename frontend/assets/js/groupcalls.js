@@ -89,6 +89,28 @@
  * shared screen; every other peer's is completely unaffected, satisfying
  * the same per-peer failure isolation the base audio mesh already has.
  *
+ * Camera video extends this SAME mesh the same way screen sharing does —
+ * one MORE independent track/sender per peer connection, added/removed via
+ * the identical negotiateWithPeer/addTrack/replaceTrack(null) machinery
+ * (see startCamera/stopCamera/addCameraTrackToPeer) — never a second
+ * connection, never a second signaling channel. The key difference from
+ * screen sharing: camera has no server-enforced "one at a time" slot — any
+ * number of participants may have a camera on simultaneously (up to the
+ * existing participant cap), so there's no models.Call column to reconcile
+ * against. Each participant's camera on/off is tracked purely via the
+ * broadcast 'camera-state' signal (same shape/reasoning as 'mute-state' —
+ * see schemas.CALL_SIGNAL_TYPES's docstring) into that participant's own
+ * state.participants entry, rendered as a responsive grid of video tiles
+ * (renderCameraGrid) alongside — never instead of — the existing
+ * audio-participant list and the screen-share viewer. Because a peer
+ * connection can now carry a camera track AND a screen-share track AND
+ * audio at once, each renegotiation's offer carries a small extra
+ * `videoKind: 'camera' | 'screen'` field (see negotiateWithPeer's
+ * `offerExtras` param) purely so the RECEIVING side's ontrack can tell the
+ * two kinds of incoming video apart — WebRTC's own ontrack event has no
+ * such notion built in, and unlike screen sharing (server-authoritative)
+ * there's nothing else to disambiguate against for camera.
+ *
  * Surviving a page refresh: a reload destroys this whole module's JS state
  * (every RTCPeerConnection, localStream, everything in `state`) — that part
  * is unavoidable. What's NOT unavoidable is treating that reload as
@@ -146,20 +168,25 @@ const GroupCalls = (function ($) {
     localStream: null,
     muted: false,
     localSpeaking: false,
-    // userId -> { user, status: 'invited'|'joined', muted, connectionState: 'connecting'|'connected'|'failed'|null }
+    // userId -> { user, status: 'invited'|'joined', muted, cameraOn,
+    // connectionState: 'connecting'|'connected'|'failed'|null }
     // Built fresh from every poll's participants list (see
-    // reconcileParticipants) — server-authoritative except connectionState,
-    // which is this client's own WebRTC-level view of that peer.
+    // reconcileParticipants) — server-authoritative except muted/cameraOn
+    // (reconciled from the broadcast 'mute-state'/'camera-state' signals —
+    // neither has any server-side column, see models.CallSignal's
+    // docstring) and connectionState (this client's own WebRTC-level view
+    // of that peer).
     participants: new Map(),
     // userId -> { pc, pendingCandidates, negotiating, pendingNegotiation,
-    // pendingAnswerResolve, pendingAnswerReject, answerTimeout, screenSender,
-    // remoteScreenTrack, remoteScreenStream }. One entry per OTHER
-    // participant this side currently has (or is establishing) a live
-    // RTCPeerConnection with — never one per signal, never one shared
-    // connection for the whole call. See negotiateWithPeer for the
-    // per-peer (never global) negotiation fields, and the module docstring's
-    // screen-sharing paragraphs for screenSender/remoteScreenTrack/
-    // remoteScreenStream.
+    // pendingAnswerResolve, pendingAnswerReject, answerTimeout,
+    // pendingIncomingVideoKind, screenSender, remoteScreenTrack,
+    // remoteScreenStream, cameraSender, remoteCameraTrack,
+    // remoteCameraStream }. One entry per OTHER participant this side
+    // currently has (or is establishing) a live RTCPeerConnection with —
+    // never one per signal, never one shared connection for the whole call.
+    // See negotiateWithPeer for the per-peer (never global) negotiation
+    // fields, and the module docstring's screen-sharing/camera paragraphs
+    // for the rest.
     peers: new Map(),
     lastSignalId: 0,
     // --- Screen sharing (see module docstring) ---------------------------
@@ -186,6 +213,16 @@ const GroupCalls = (function ($) {
     // browser tab by construction — never signaled/persisted — so each
     // participant's expand/collapse is already isolated with no extra code.
     screenViewerExpanded: false,
+    // --- Camera (see module docstring) -----------------------------------
+    // This side's own outgoing camera track, if any — entirely separate
+    // from localStream (the microphone) above, same "never coupled" posture
+    // toggleMute/toggleCamera already establish for a 1:1 call in calls.js.
+    localCameraStream: null,
+    localCameraTrack: null,
+    cameraOn: false,
+    // True from the click until getUserMedia resolves/rejects — guards a
+    // rapid double-click the same way startingScreenShare does for sharing.
+    startingCamera: false,
     // Bumped on every teardown, same "invalidate in-flight requests for the
     // call that just ended" guard calls.js's pollGeneration provides.
     pollGeneration: 0,
@@ -223,13 +260,15 @@ const GroupCalls = (function ($) {
 
   let $appShell;
   let $banner, $bannerAvatar, $bannerCreator, $dismissBtn, $joinBtn;
-  let $bar, $barCount, $muteBtn, $peopleBtn, $endBtn, $leaveBtn;
+  let $bar, $barCount, $muteBtn, $cameraBtn, $peopleBtn, $endBtn, $leaveBtn;
   let $panel, $panelList, $panelClose;
   let $audioContainer;
   let $modalOverlay, $modalHint, $modalList, $modalCancelBtn, $modalConfirmBtn, $modalCloseBtn;
   // Screen sharing — see the module docstring's screen-sharing paragraphs.
   let $screenShareBtn, $sharingIndicator, $sharingIndicatorText;
   let $screenPanel, $screenVideo, $screenExpandBtn;
+  // Camera — see the module docstring's camera paragraph.
+  let $videoGrid;
   // Add People (mid-call) — see openAddPeopleModal.
   let $addPeopleBtn, $addPeopleModalOverlay, $addPeopleSearchInput, $addPeopleHint, $addPeopleList;
   let $addPeopleCancelBtn, $addPeopleConfirmBtn, $addPeopleModalCloseBtn;
@@ -247,6 +286,7 @@ const GroupCalls = (function ($) {
     $bar = $('#groupCallBar');
     $barCount = $('#groupCallBarCount');
     $muteBtn = $('#groupCallMuteBtn');
+    $cameraBtn = $('#groupCallCameraBtn');
     $peopleBtn = $('#groupCallPeopleBtn');
     $endBtn = $('#groupCallEndBtn');
     $leaveBtn = $('#groupCallLeaveBtn');
@@ -263,6 +303,8 @@ const GroupCalls = (function ($) {
     $screenPanel = $('#groupCallScreenPanel');
     $screenVideo = $('#groupCallScreenVideo');
     $screenExpandBtn = $('#groupCallScreenExpandBtn');
+
+    $videoGrid = $('#groupCallVideoGrid');
 
     $modalOverlay = $('#groupCallStartModalOverlay');
     $modalHint = $('#groupCallStartModalHint');
@@ -283,6 +325,7 @@ const GroupCalls = (function ($) {
     $joinBtn.on('click', joinIncoming);
     $dismissBtn.on('click', dismissIncoming);
     $muteBtn.on('click', toggleMute);
+    $cameraBtn.on('click', toggleCamera);
     $peopleBtn.on('click', togglePanel);
     $panelClose.on('click', togglePanel);
     $leaveBtn.on('click', leaveCall);
@@ -832,6 +875,14 @@ const GroupCalls = (function ($) {
     state.creatorId = call.creator.id;
     state.phase = 'active';
     state.muted = false;
+    // Never auto-enabled on join OR resume (task requirement) — mirrors
+    // this module's existing choice not to persist state.muted across a
+    // refresh either (unlike calls.js's 1:1 calls, which use a localStorage
+    // recovery hint for both — see resumeActiveCall's own docstring for why
+    // a group call's reconnect story is simpler: nothing here is restored,
+    // it's just always off until the user explicitly turns it on again).
+    state.cameraOn = false;
+    state.startingCamera = false;
     state.dismissedCallId = null;
     // A late joiner needs to know who's already sharing (if anyone) right
     // away — set directly rather than through syncScreenShareState, since
@@ -953,6 +1004,14 @@ const GroupCalls = (function ($) {
       pendingAnswerResolve: null,
       pendingAnswerReject: null,
       answerTimeout: null,
+      // Set just before setRemoteDescription for an incoming 'offer' that
+      // adds a NEW video track (see handleSignal's 'offer' branch and
+      // negotiateWithPeer's offerExtras param) — tells the very next
+      // ontrack's video-kind branch whether the track it's about to see is
+      // a camera or a screen share, since WebRTC's own ontrack event has no
+      // such notion built in. Always consumed (reset to null) by that same
+      // ontrack — see createPeerConnectionFor.
+      pendingIncomingVideoKind: null,
       // This side's OUTGOING screen-share sender on THIS connection, once
       // added (see addScreenTrackToPeer) — independent per peer, task
       // requirement.
@@ -961,7 +1020,16 @@ const GroupCalls = (function ($) {
       // current sharer — also independent per peer, so one peer's failure
       // never touches another's copy (see module docstring).
       remoteScreenTrack: null,
-      remoteScreenStream: null
+      remoteScreenStream: null,
+      // This side's OUTGOING camera sender on THIS connection, once added
+      // (see addCameraTrackToPeer) — same independence reasoning as
+      // screenSender above.
+      cameraSender: null,
+      // Whatever this peer is sending US as their camera, if their camera
+      // is currently on — same independence reasoning as remoteScreenTrack
+      // above (see the module docstring's camera paragraph).
+      remoteCameraTrack: null,
+      remoteCameraStream: null
     };
     state.peers.set(userId, peer);
     setConnectionState(userId, 'connecting');
@@ -972,6 +1040,31 @@ const GroupCalls = (function ($) {
 
     pc.ontrack = function (e) {
       if (e.track.kind === 'video') {
+        // See peer.pendingIncomingVideoKind's own docstring above — set by
+        // handleSignal's 'offer' branch right before setRemoteDescription,
+        // consumed here exactly once. Defaults to 'screen' so an offer sent
+        // by a peer running older in-session state (there isn't one in
+        // practice — this is a same-deploy signal — but the fallback costs
+        // nothing) still lands on the pre-camera-feature behavior rather
+        // than silently dropping the track.
+        const videoKind = peer.pendingIncomingVideoKind || 'screen';
+        peer.pendingIncomingVideoKind = null;
+
+        if (videoKind === 'camera') {
+          peer.remoteCameraTrack = e.track;
+          peer.remoteCameraStream = e.streams[0];
+          e.track.onended = function () {
+            const p = state.peers.get(userId);
+            if (p && p.remoteCameraTrack === e.track) {
+              p.remoteCameraTrack = null;
+              p.remoteCameraStream = null;
+            }
+            renderCameraGrid();
+          };
+          renderCameraGrid();
+          return;
+        }
+
         peer.remoteScreenTrack = e.track;
         peer.remoteScreenStream = e.streams[0];
         // The track can arrive before the broadcast signal/next poll
@@ -1045,6 +1138,7 @@ const GroupCalls = (function ($) {
     peer.pc.close();
     state.peers.delete(userId);
     removeAudioEl(userId);
+    removeVideoTile(userId); // no-op if this peer never had a camera tile — see renderCameraGrid
     if (state.activeSharerId === userId) {
       // Lost the connection carrying the current sharer's video — clear
       // THIS side's viewer immediately rather than leaving a frozen last
@@ -1068,27 +1162,35 @@ const GroupCalls = (function ($) {
 
   /**
    * Runs an offer/answer exchange against peer `userId`'s OWN
-   * RTCPeerConnection — used for BOTH that peer's very first (base call)
+   * RTCPeerConnection — used for the peer's very first (base call)
    * negotiation (`prepare` is null) AND, later, adding this side's screen
-   * track to it (`prepare` calls pc.addTrack — see addScreenTrackToPeer).
-   * Serialized entirely through THIS peer's own `negotiating` flag (task
-   * requirement: no global flag) — a second call while one is already in
-   * flight is queued as `pendingNegotiation` and retried the moment the
-   * first settles (see settlePeerNegotiation), rather than ever starting a
-   * second concurrent local negotiation on one RTCPeerConnection, which
-   * WebRTC itself would reject. Resolves once the matching answer has been
-   * received and applied, or rejects on failure/timeout — callers decide
-   * what "this one peer failed" means for them (base call: tear the peer
-   * down; screen add: just drop that one sender — see addScreenTrackToPeer).
+   * or camera track to it (`prepare` calls pc.addTrack — see
+   * addScreenTrackToPeer/addCameraTrackToPeer). Serialized entirely through
+   * THIS peer's own `negotiating` flag (task requirement: no global flag) —
+   * a second call while one is already in flight is queued as
+   * `pendingNegotiation` and retried the moment the first settles (see
+   * settlePeerNegotiation), rather than ever starting a second concurrent
+   * local negotiation on one RTCPeerConnection, which WebRTC itself would
+   * reject. Resolves once the matching answer has been received and
+   * applied, or rejects on failure/timeout — callers decide what "this one
+   * peer failed" means for them (base call: tear the peer down; screen/
+   * camera add: just drop that one sender — see addScreenTrackToPeer/
+   * addCameraTrackToPeer).
+   *
+   * `offerExtras`, when given, is merged into the offer signal's payload
+   * alongside `sdp` — used exclusively to carry `videoKind: 'camera' |
+   * 'screen'` (see addScreenTrackToPeer/addCameraTrackToPeer) so the
+   * RECEIVING side's ontrack can tell the two kinds of video apart; the
+   * base call and a queued retry of a call that had none simply omit it.
    */
-  function negotiateWithPeer(userId, prepare) {
+  function negotiateWithPeer(userId, prepare, offerExtras) {
     const peer = state.peers.get(userId);
     if (!peer) return Promise.resolve();
 
     if (peer.negotiating) {
       return new Promise(function (resolve, reject) {
         peer.pendingNegotiation = function () {
-          negotiateWithPeer(userId, prepare).then(resolve, reject);
+          negotiateWithPeer(userId, prepare, offerExtras).then(resolve, reject);
         };
       });
     }
@@ -1099,7 +1201,8 @@ const GroupCalls = (function ($) {
     return peer.pc.createOffer()
       .then(function (offer) { return peer.pc.setLocalDescription(offer); })
       .then(function () {
-        sendSignal(userId, 'offer', { sdp: peer.pc.localDescription });
+        const offerPayload = Object.assign({ sdp: peer.pc.localDescription }, offerExtras);
+        sendSignal(userId, 'offer', offerPayload);
         return new Promise(function (resolve, reject) {
           peer.pendingAnswerResolve = resolve;
           peer.pendingAnswerReject = reject;
@@ -1115,13 +1218,19 @@ const GroupCalls = (function ($) {
 
   /** Clears peer `userId`'s negotiation lock and either runs whatever got
    * queued behind it, or — if nothing did — opportunistically adds this
-   * side's screen track to it when this side is currently sharing and
-   * hasn't added it to THIS peer yet (the late-joiner / reconnect case —
-   * see the module docstring). Called both when an offerer's answer lands
-   * (negotiateWithPeer's own .finally) and right after an answerer finishes
-   * sending ITS answer (handleSignal's 'offer' branch) — the same hook
-   * either way, since either side settling is equally "this peer's base
-   * call is now ready for a screen track if one's due". */
+   * side's screen and/or camera track to it when this side currently has
+   * either active and hasn't added it to THIS peer yet (the late-joiner /
+   * reconnect case — see the module docstring). Both checks run
+   * independently (never else-if): a peer that connects while this side is
+   * BOTH sharing its screen AND has its camera on needs both added, and the
+   * per-peer negotiation queue this same function drives already serializes
+   * the two additions correctly if both fire here at once (the second call
+   * just queues behind the first — see negotiateWithPeer). Called both when
+   * an offerer's answer lands (negotiateWithPeer's own .finally) and right
+   * after an answerer finishes sending ITS answer (handleSignal's 'offer'
+   * branch) — the same hook either way, since either side settling is
+   * equally "this peer's base call is now ready for a screen/camera track
+   * if one's due". */
   function settlePeerNegotiation(userId) {
     const peer = state.peers.get(userId);
     if (!peer) return;
@@ -1134,6 +1243,9 @@ const GroupCalls = (function ($) {
     }
     if (state.sharingScreen && !peer.screenSender) {
       addScreenTrackToPeer(userId);
+    }
+    if (state.cameraOn && !peer.cameraSender) {
+      addCameraTrackToPeer(userId);
     }
   }
 
@@ -1154,7 +1266,7 @@ const GroupCalls = (function ($) {
     }
     negotiateWithPeer(userId, function (p) {
       p.screenSender = p.pc.addTrack(state.localScreenTrack, state.localScreenStream);
-    }).catch(function () {
+    }, { videoKind: 'screen' }).catch(function () {
       // This ONE peer's screen renegotiation failed — isolate it (task
       // requirement): drop just this sender, leave the base audio
       // connection to them (and every other peer's screen feed) completely
@@ -1167,11 +1279,56 @@ const GroupCalls = (function ($) {
     });
   }
 
+  /** Adds (or reuses) this side's OWN local camera track as a sender on
+   * peer `userId`'s connection — same shape as addScreenTrackToPeer above,
+   * called once per peer when the camera turns on (looped over every
+   * currently-connected peer — see startCamera) and again, automatically,
+   * whenever a NEW peer connection settles while the camera is already on
+   * (see settlePeerNegotiation). */
+  function addCameraTrackToPeer(userId) {
+    const peer = state.peers.get(userId);
+    if (!peer || !state.localCameraTrack) return;
+    if (peer.cameraSender) {
+      // Already added earlier THIS call (e.g. turning the camera back on
+      // after an earlier stop) — reuse it via replaceTrack, no
+      // renegotiation needed, same optimization addScreenTrackToPeer uses.
+      peer.cameraSender.replaceTrack(state.localCameraTrack).catch(function () {});
+      return;
+    }
+    negotiateWithPeer(userId, function (p) {
+      p.cameraSender = p.pc.addTrack(state.localCameraTrack, state.localCameraStream);
+    }, { videoKind: 'camera' }).catch(function () {
+      // This ONE peer's camera renegotiation failed — isolate it (task
+      // requirement): drop just this sender, leave the base audio
+      // connection to them (and every other peer's camera/screen feed)
+      // completely untouched. That peer's tile simply never gets our video.
+      const p = state.peers.get(userId);
+      if (p && p.cameraSender) {
+        try { p.pc.removeTrack(p.cameraSender); } catch (e) { /* connection may already be closed */ }
+        p.cameraSender = null;
+      }
+    });
+  }
+
   function handleSignal(fromUserId, signal) {
     if (signal.message_type === 'mute-state') {
       const p = state.participants.get(fromUserId);
       if (p) p.muted = !!signal.payload.muted;
       renderParticipants();
+      return;
+    }
+
+    if (signal.message_type === 'camera-state') {
+      // The ONLY "is this participant's camera on" fact this module has —
+      // see the module docstring's camera paragraph for why track liveness
+      // alone can't serve that role. Reconciled on top of whatever WebRTC
+      // track this peer has already sent us (renderCameraGrid checks both:
+      // this flag for show/hide, the track's readyState for "show the real
+      // video vs. a connecting placeholder").
+      const p = state.participants.get(fromUserId);
+      if (p) p.cameraOn = !!signal.payload.enabled;
+      renderCameraGrid();
+      renderParticipants(); // panel row's "Camera on" status text — see renderParticipants
       return;
     }
 
@@ -1194,9 +1351,14 @@ const GroupCalls = (function ($) {
     if (signal.message_type === 'offer') {
       if (!peer) peer = createPeerConnectionFor(fromUserId);
       // Guards against a locally-initiated negotiateWithPeer (e.g. a
-      // queued screen-add) starting a second, competing offer to this SAME
-      // peer while we're mid-answer — see negotiateWithPeer's own queueing.
+      // queued screen/camera-add) starting a second, competing offer to
+      // this SAME peer while we're mid-answer — see negotiateWithPeer's own
+      // queueing.
       peer.negotiating = true;
+      // See peer.pendingIncomingVideoKind's own docstring (createPeerConnectionFor)
+      // — must be set BEFORE setRemoteDescription, since that call is what
+      // synchronously fires ontrack for a newly-added video track.
+      peer.pendingIncomingVideoKind = signal.payload.videoKind || null;
       peer.pc.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp))
         .then(function () { return flushPendingCandidates(peer); })
         .then(function () { return peer.pc.createAnswer(); })
@@ -1282,6 +1444,13 @@ const GroupCalls = (function ($) {
         user: p.user,
         status: p.status,
         muted: existing ? existing.muted : false,
+        // Reconciled purely from the broadcast 'camera-state' signal (see
+        // handleSignal) — never from this server list, which has no notion
+        // of camera state at all (see the module docstring). Defaults false
+        // same as muted: a freshly-seen participant is assumed camera-off
+        // until their own signal (replayed on a late joiner's first poll,
+        // same as mute-state) says otherwise.
+        cameraOn: existing ? existing.cameraOn : false,
         connectionState: p.user.id === state.currentUser.id ? 'connected' : (existing ? existing.connectionState : null)
       });
 
@@ -1487,6 +1656,140 @@ const GroupCalls = (function ($) {
     renderBar();
   }
 
+  // --- Camera (see module docstring) ---------------------------------------
+  // Entirely independent of mute above and of screen sharing below — a
+  // separate track, a separate flag, a separate button (same "never
+  // coupled" requirement calls.js's 1:1 toggleCamera already follows for
+  // mic vs. camera). Unlike screen sharing, there is no server-side slot to
+  // claim first: any number of participants may have a camera on at once,
+  // so starting one is purely a local getUserMedia call plus a broadcast
+  // signal, never a REST claim that could 409.
+
+  function cameraSupported() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  }
+
+  function toggleCamera() {
+    if (state.cameraOn) {
+      stopCamera(false);
+    } else {
+      startCamera();
+    }
+  }
+
+  /** Only reachable while actually in the call and not already on/starting
+   * — see renderCameraButton's disabled state, which mirrors this same
+   * check for the UI. Camera permission is requested HERE, at the moment
+   * the user explicitly clicks the button — never at join time (task
+   * requirement: joining a group call must never touch the camera). */
+  function startCamera() {
+    if (state.phase !== 'active' || !state.callId) return;
+    if (state.cameraOn || state.startingCamera) return;
+    if (!cameraSupported()) {
+      Ping.showToast('Your browser does not support camera video.', 'error');
+      return;
+    }
+
+    state.startingCamera = true;
+    renderBar();
+    const myGeneration = state.pollGeneration;
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then(function (stream) {
+        if (state.pollGeneration !== myGeneration || state.phase !== 'active') {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return Promise.reject({ superseded: true });
+        }
+
+        state.localCameraStream = stream;
+        state.localCameraTrack = stream.getVideoTracks()[0];
+        // The task's mandatory case: the camera is stopped by the OS/browser
+        // itself (device unplugged, revoked permission, another app taking
+        // exclusive access) rather than PING's own button — mirrors
+        // startScreenShare's identical handling of the browser's native
+        // "Stop sharing" control.
+        state.localCameraTrack.onended = function () {
+          if (state.cameraOn) stopCamera(true);
+        };
+        state.cameraOn = true;
+        state.startingCamera = false;
+        render(); // show the local camera tile (task requirement) the instant it's available
+
+        // Add to every peer already connected; any peer that connects LATER
+        // while the camera is still on picks it up automatically via
+        // settlePeerNegotiation once its own base negotiation settles —
+        // same "late joiner receives active feeds" mechanism screen sharing
+        // already established.
+        Array.from(state.peers.keys()).forEach(function (userId) { addCameraTrackToPeer(userId); });
+        sendSignal(null, 'camera-state', { enabled: true }); // broadcast — see models.CallSignal's peer_user_id docstring
+      })
+      .catch(function (err) {
+        state.startingCamera = false;
+        if (err && err.superseded) { render(); return; }
+        // Never terminates the call (task requirement) — just a toast; the
+        // participant stays fully in the audio call exactly as before.
+        Ping.showToast(cameraErrorMessage(err), 'error');
+        render();
+      });
+  }
+
+  /**
+   * @param fromBrowser true when this is the browser/OS stopping the camera
+   *   itself (localCameraTrack.onended firing), rather than PING's own
+   *   button — task requirement: both must land in exactly the same state.
+   */
+  function stopCamera(fromBrowser) {
+    if (!state.cameraOn && !state.localCameraStream) return;
+    stopLocalCameraTracks();
+    sendSignal(null, 'camera-state', { enabled: false }); // broadcast — see models.CallSignal's peer_user_id docstring
+    render();
+    if (fromBrowser) Ping.showToast('Camera stopped', 'error');
+  }
+
+  /** Stops and releases this side's own outgoing camera capture (releasing
+   * the hardware — task requirement), and clears every peer's sender via
+   * replaceTrack(null) — no renegotiation needed to stop (task allows
+   * "remove or replace"; this always replaces, mirroring
+   * stopLocalScreenShareTracks so turning the camera back on later this
+   * same call can reuse the same senders). Deliberately does NOT touch
+   * state.peers' membership — callers (stopCamera, teardownToIdle) decide
+   * what happens next; teardownToIdle calls this directly (skipping
+   * stopCamera's broadcast signal) for the same "the call is ending, no
+   * point telling anyone" reason it already skips stopScreenShare's REST
+   * call. */
+  function stopLocalCameraTracks() {
+    if (state.localCameraTrack) {
+      state.localCameraTrack.onended = null;
+      state.localCameraTrack.stop();
+    }
+    if (state.localCameraStream) {
+      state.localCameraStream.getTracks().forEach(function (t) { t.stop(); }); // releases the OS-level camera indicator
+    }
+    state.localCameraStream = null;
+    state.localCameraTrack = null;
+    state.cameraOn = false;
+    state.peers.forEach(function (peer) {
+      if (peer.cameraSender) peer.cameraSender.replaceTrack(null).catch(function () {});
+    });
+  }
+
+  function cameraErrorMessage(err) {
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      return 'Camera permission is required to turn on your camera.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'No camera was found on this device.';
+    }
+    if (name === 'NotReadableError' || name === 'TrackStartError') {
+      return 'Your camera could not be accessed — it may be in use by another application.';
+    }
+    if (name === 'OverconstrainedError') {
+      return 'Camera is not supported with the requested settings.';
+    }
+    return 'Unable to turn on your camera.';
+  }
+
   // --- Screen viewer expand/collapse (UI-only) -----------------------------
   // Mirrors calls.js's own toggleScreenViewerExpanded/collapseScreenViewer —
   // pure local view-size state, never signaled/persisted, so each
@@ -1594,6 +1897,7 @@ const GroupCalls = (function ($) {
     Array.from(state.peers.keys()).forEach(teardownPeer);
     cleanupLocalMedia();
     stopLocalScreenShareTracks();
+    stopLocalCameraTracks();
     stopSpeakingDetection();
     if (!$addPeopleModalOverlay.prop('hidden')) closeAddPeopleModal(); // e.g. the call ended while this side had it open
 
@@ -1609,6 +1913,7 @@ const GroupCalls = (function ($) {
     state.activeSharerId = null;
     state.startingScreenShare = false;
     state.screenViewerExpanded = false;
+    state.startingCamera = false;
 
     render();
     scheduleNextPoll();
@@ -1643,6 +1948,7 @@ const GroupCalls = (function ($) {
     renderPanelVisibility();
     renderParticipants();
     renderScreenPanel();
+    renderCameraGrid();
   }
 
   function renderBanner() {
@@ -1666,11 +1972,26 @@ const GroupCalls = (function ($) {
 
     $endBtn.prop('hidden', state.creatorId !== state.currentUser.id);
 
+    renderCameraButton();
     renderScreenShareButton();
     renderSharingIndicator();
     renderAddPeopleButton();
 
     Ping.renderIcons($bar[0]);
+  }
+
+  /** Mirrors renderCameraButton in calls.js — is-active shows the OFF state
+   * (mic's own is-active convention above is inverted the same way: it
+   * marks MUTED, not "microphone active"), disabled only while a start is
+   * already in flight (never for the "on" state itself — clicking it again
+   * is how the user turns the camera back off). */
+  function renderCameraButton() {
+    $cameraBtn
+      .prop('disabled', state.startingCamera)
+      .toggleClass('is-active', !state.cameraOn)
+      .attr('aria-label', state.cameraOn ? 'Turn off camera' : 'Turn on camera')
+      .attr('title', state.cameraOn ? 'Turn off camera' : 'Turn on camera')
+      .find('i').attr('data-lucide', state.cameraOn ? 'video' : 'video-off');
   }
 
   function renderScreenShareButton() {
@@ -1725,6 +2046,13 @@ const GroupCalls = (function ($) {
     const sharerId = state.activeSharerId;
     const show = state.phase === 'active' && sharerId != null;
     $screenPanel.prop('hidden', !show);
+    // Lets .group-call-video-grid's narrow-screen CSS shift itself below
+    // the screen-share panel instead of overlapping it — both are
+    // independent position:fixed floating panels (see the module docstring:
+    // deliberately never the same element as the screen viewer) that only
+    // have room to sit side-by-side at desktop widths — see main.css's
+    // body.group-call-screen-sharing rule.
+    document.body.classList.toggle('group-call-screen-sharing', show);
 
     if (!show) {
       if (state.screenViewerExpanded) {
@@ -1754,6 +2082,146 @@ const GroupCalls = (function ($) {
     } else if ($screenVideo[0].srcObject) {
       $screenVideo[0].srcObject = null;
     }
+  }
+
+  // --- Camera video grid (see module docstring) ----------------------------
+  // A separate floating panel from the screen-share viewer above — never the
+  // same element, never overlapping in meaning: this one is ALWAYS faces
+  // (this side's own camera plus every remote participant who currently has
+  // theirs on), the other is ALWAYS the one active screen share, and both
+  // can be visible at once (task requirement).
+
+  /** Every {userId, user, isMe} entry that should currently have a tile —
+   * the single source of truth renderCameraGrid reconciles the DOM against.
+   * Self is included via state.cameraOn directly (mirrors how renderBar
+   * reads state.muted directly rather than a self-entry in
+   * state.participants); every other tile-worthy participant is read off
+   * that same map's cameraOn flag (see reconcileParticipants/handleSignal's
+   * 'camera-state' branch — the ONLY source for that flag, since the server
+   * has no notion of camera state at all). */
+  function cameraGridEntries() {
+    const entries = [];
+    if (state.cameraOn) {
+      entries.push({ userId: state.currentUser.id, user: state.currentUser, isMe: true });
+    }
+    state.participants.forEach(function (p, userId) {
+      if (userId === state.currentUser.id) return;
+      if (p.status === 'joined' && p.cameraOn) {
+        entries.push({ userId: userId, user: p.user, isMe: false });
+      }
+    });
+    return entries;
+  }
+
+  /** Gets-or-creates the tile for `userId` — same stable-id-keyed reuse
+   * pattern ensureAudioEl already established for the audio mesh, so a tile
+   * already showing live video is never torn down and recreated by a later
+   * render() call (task requirement: no flicker, no duplicate elements). */
+  function ensureVideoTile(userId, user, isMe) {
+    let el = document.getElementById('groupCallVideoTile-' + userId);
+    if (el) return el;
+
+    el = document.createElement('div');
+    el.id = 'groupCallVideoTile-' + userId;
+    el.className = 'group-call-video-tile' + (isMe ? ' group-call-video-tile--self' : '');
+    el.setAttribute('data-user-id', String(userId));
+
+    const video = document.createElement('video');
+    video.className = 'group-call-video-tile__video';
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true; // audio always flows through the separate <audio> mesh (ensureAudioEl) — never duplicated here
+
+    const placeholder = document.createElement('div');
+    placeholder.className = 'group-call-video-tile__placeholder';
+    const avatarSpan = document.createElement('span');
+    avatarSpan.className = 'avatar avatar--md';
+    placeholder.appendChild(avatarSpan);
+
+    const label = document.createElement('span');
+    label.className = 'group-call-video-tile__name';
+
+    el.appendChild(video);
+    el.appendChild(placeholder);
+    el.appendChild(label);
+    $videoGrid.append(el);
+
+    Avatars.apply($(avatarSpan), user.name, user.avatar_url);
+    return el;
+  }
+
+  /** Tears down and removes one tile — releasing its <video>'s srcObject
+   * FIRST (task requirement: no video continuing to play/decode after a
+   * participant leaves or turns their camera off) before detaching it from
+   * the DOM. A safe no-op if `userId` never had a tile. */
+  function removeVideoTile(userId) {
+    const el = document.getElementById('groupCallVideoTile-' + userId);
+    if (!el) return;
+    const video = el.querySelector('video');
+    if (video) video.srcObject = null;
+    el.remove();
+  }
+
+  /** Single idempotent entry point (same posture as renderScreenPanel) —
+   * safe to call from anywhere a participant's cameraOn flag, a peer's
+   * remote camera track, or the call's own phase changes (a signal, a
+   * poll, ontrack, teardown). Reconciles the grid's actual DOM children
+   * against cameraGridEntries() by stable user id rather than ever
+   * emptying/rebuilding the container, so an already-playing tile is never
+   * flickered or duplicated (task requirement). */
+  function renderCameraGrid() {
+    if (state.phase !== 'active') {
+      // Full reset — the call itself is ending/not yet active, nothing to
+      // reconcile incrementally. Clear every srcObject first for the same
+      // "no lingering playback" reason removeVideoTile does.
+      Array.from($videoGrid[0].children).forEach(function (el) {
+        const video = el.querySelector('video');
+        if (video) video.srcObject = null;
+      });
+      $videoGrid.empty().prop('hidden', true);
+      return;
+    }
+
+    const entries = cameraGridEntries();
+    const wantedIds = new Set(entries.map(function (e) { return e.userId; }));
+
+    Array.from($videoGrid[0].children).forEach(function (el) {
+      const id = Number(el.getAttribute('data-user-id'));
+      if (!wantedIds.has(id)) removeVideoTile(id);
+    });
+
+    entries.forEach(function (entry) {
+      const el = ensureVideoTile(entry.userId, entry.user, entry.isMe);
+      el.querySelector('.group-call-video-tile__name').textContent = entry.isMe ? entry.user.name + ' (You)' : entry.user.name;
+
+      let stream = null;
+      let live = false;
+      if (entry.isMe) {
+        stream = state.localCameraStream;
+        live = !!stream;
+      } else {
+        const peer = state.peers.get(entry.userId);
+        // Track liveness here is ONLY "do we have a video element to show
+        // at all yet" (still renegotiating vs. already arrived) — never
+        // "is the camera currently on" (see the module docstring: a
+        // replaceTrack(null)'d remote track stays readyState 'live'
+        // forever). That's why entries are filtered by cameraOn ABOVE
+        // (cameraGridEntries), not here.
+        live = !!(peer && peer.remoteCameraTrack && peer.remoteCameraTrack.readyState === 'live');
+        stream = live ? peer.remoteCameraStream : null;
+      }
+
+      const video = el.querySelector('video');
+      if (live) {
+        if (video.srcObject !== stream) video.srcObject = stream;
+        el.classList.remove('group-call-video-tile--connecting');
+      } else {
+        if (video.srcObject) video.srcObject = null;
+        el.classList.add('group-call-video-tile--connecting');
+      }
+    });
+
+    $videoGrid.prop('hidden', entries.length === 0);
   }
 
   function renderPanelVisibility() {
@@ -1794,6 +2262,7 @@ const GroupCalls = (function ($) {
       const statusParts = [];
       if (isMe) {
         statusParts.push(state.muted ? 'Muted' : 'Connected');
+        if (state.cameraOn) statusParts.push('Camera on');
       } else {
         if (p.status === 'invited') {
           statusParts.push(STATUS_LABEL.invited);
@@ -1803,6 +2272,7 @@ const GroupCalls = (function ($) {
           statusParts.push(STATUS_LABEL.joined);
         }
         if (p.muted) statusParts.push('Muted');
+        if (p.cameraOn) statusParts.push('Camera on');
       }
       if (p.user.id === state.activeSharerId) statusParts.push('Sharing screen');
       $row.append($('<span>', { class: 'group-call-participant__status', text: statusParts.join(' · ') }));

@@ -92,6 +92,15 @@
     <button type="button" class="icon-btn group-call-bar__mute" id="groupCallMuteBtn" aria-label="Mute microphone" title="Mute">
       <i data-lucide="mic" aria-hidden="true"></i>
     </button>
+    <!-- Camera on/off toggle — unlike screen sharing below, never disabled
+         for "someone else already has it" (any number of participants may
+         have a camera on at once, no server-side slot to wait on) and never
+         requests permission until clicked (task requirement: joining a
+         group call must never touch the camera). See groupcalls.js's
+         renderCameraButton/toggleCamera. -->
+    <button type="button" class="icon-btn group-call-bar__camera" id="groupCallCameraBtn" aria-label="Turn on camera" title="Turn on camera">
+      <i data-lucide="video-off" aria-hidden="true"></i>
+    </button>
     <!-- Share Screen / Stop Sharing toggle — disabled (not hidden) while
          someone ELSE is sharing, same "visible but non-interactive so the
          reason is discoverable" posture as other disabled controls in this
@@ -143,6 +152,15 @@
       </button>
     </div>
   </div>
+
+  <!-- Camera video grid — one tile per participant with an active camera,
+       including this side's own local preview. Entirely separate from the
+       screen-share viewer above: a tile here is always a face, never a
+       shared screen, and both can be visible at once. Tiles are created/
+       removed by groupcalls.js as cameras turn on/off (see
+       renderCameraGrid) — never static markup, since the set of active
+       cameras is fully dynamic. -->
+  <div class="group-call-video-grid" id="groupCallVideoGrid" hidden></div>
 
   <!-- One <audio autoplay> per remote participant, created/removed by
        groupcalls.js as peers join/leave — unlike #callRemoteAudio (a single
